@@ -1,19 +1,36 @@
 # Mirrors the THEMES dict in biomet_app.py. This exists only so native,
 # canvas-rendered widgets (st.dataframe) and anything else outside our own
-# CSS reach pick up matching colours. The app's own light/dark toggle stays
-# the source of truth; see the sync script next to `inject_css()` that keeps
-# this native theme in step with it.
+# CSS reach pick up matching colours. The app's own theme toggle is
+# disabled for now and pinned to light (native st.dataframe/toolbar don't
+# follow the CSS-only dark theme), so this locks the native theme to light
+# too, via a single [theme] table instead of [theme.light]/[theme.dark]:
+# with both defined, Streamlit's own settings menu lets a user flip the
+# native theme to dark independently, which would reopen the mismatch.
+# There is no sync script anymore (it caused a reload loop) — this file is
+# now the only thing keeping native rendering in step with the app.
+#
+# To restore dark mode later: bring back [theme.light]/[theme.dark] below
+# (values kept in the comment), re-enable the toggle in biomet_app.py, and
+# add a native-theme sync that doesn't loop (the removed one navigated on
+# every mismatch, which fought the pin).
 
-[theme.light]
+[theme]
 primaryColor = "#C24A20"
 backgroundColor = "#FBFAF7"
 secondaryBackgroundColor = "#FFFFFF"
 textColor = "#1B2429"
 borderColor = "#E2E0DA"
 
-[theme.dark]
-primaryColor = "#D9542B"
-backgroundColor = "#0E1418"
-secondaryBackgroundColor = "#161F26"
-textColor = "#E3E9ED"
-borderColor = "#243139"
+# [theme.light]
+# primaryColor = "#C24A20"
+# backgroundColor = "#FBFAF7"
+# secondaryBackgroundColor = "#FFFFFF"
+# textColor = "#1B2429"
+# borderColor = "#E2E0DA"
+#
+# [theme.dark]
+# primaryColor = "#D9542B"
+# backgroundColor = "#0E1418"
+# secondaryBackgroundColor = "#161F26"
+# textColor = "#E3E9ED"
+# borderColor = "#243139"

@@ -369,15 +369,14 @@ def _toggle_all_months():
     st.session_state.months_sel = [] if all_selected else list(range(1, 13))
 
 
-if "theme" not in st.session_state:
-    # Reading this back is what makes the native-theme sync below survive
-    # its own page reload: st.session_state resets on a hard reload, a URL
-    # query param doesn't.
-    _qp_theme = st.query_params.get("theme")
-    st.session_state.theme = _qp_theme if _qp_theme in ("dark", "light") else "dark"
+# Theme toggle is disabled for now: st.dataframe and the top toolbar are
+# native Streamlit widgets that don't follow the CSS-only "dark" theme, so
+# the app looks broken with it on. Pin to "light" instead of exposing the
+# toggle; THEMES["dark"] and every T[...] reference below are left in
+# place so this can be flipped back on later.
+st.session_state.theme = "light"
 if "section" not in st.session_state:
-    _qp_section = st.query_params.get("section")
-    st.session_state.section = _qp_section if _qp_section in NAV else "Overview"
+    st.session_state.section = "Overview"
 
 with st.sidebar:
     st.markdown(f"### {APP_TITLE}")
@@ -432,41 +431,28 @@ with st.sidebar:
         months = list(range(1, 13))
     months = sorted(months)
 
-# Units and Theme live top-right, pinned above the Deploy/menu row via CSS
-# (.st-key-topbar_controls), rather than in the sidebar: the one pair of
-# controls worth having on screen no matter how far the page is scrolled.
+# Units lives top-right, pinned above the Deploy/menu row via CSS
+# (.st-key-topbar_controls), rather than in the sidebar: the one control
+# worth having on screen no matter how far the page is scrolled. The Theme
+# radio that used to sit beside it is disabled for now (see the
+# session_state.theme pin above) rather than removed, so it can be dropped
+# back in here once dark mode's native-widget gaps are fixed.
 with st.container(key="topbar_controls"):
     units = st.radio("Units", ["Metric (\u00b0C, mm)", "Imperial (\u00b0F, in)"],
                      horizontal=True, label_visibility="collapsed")
-    st.session_state.theme = st.radio(
-        "Theme", ["dark", "light"],
-        index=0 if st.session_state.theme == "dark" else 1,
-        horizontal=True, label_visibility="collapsed", format_func=str.capitalize)
 metric = units.startswith("Metric")
 
 T = THEMES[st.session_state.theme]
 inject_css(T)
 
-# Canvas-drawn widgets (st.dataframe's grid) and anything else outside our
-# own CSS's reach follow Streamlit's *native* theme, not this toggle, so
-# keep the native theme in step with it. Native theme choice lives in
-# localStorage; a mismatch means navigating (not just reloading) so the
-# ?theme= param carries session_state.theme across the reset, or the native
-# switch would win the next time this script re-checks.
-_native_theme = "Dark" if st.session_state.theme == "dark" else "Light"
-st.html(f"""<script>
-(function() {{
-    var key = "stActiveTheme-/-v2";
-    var desired = JSON.stringify("{_native_theme}");
-    if (window.localStorage.getItem(key) !== desired) {{
-        window.localStorage.setItem(key, desired);
-        var url = new URL(window.location.href);
-        url.searchParams.set("theme", "{st.session_state.theme}");
-        url.searchParams.set("section", "{st.session_state.section}");
-        window.location.replace(url.toString());
-    }}
-}})();
-</script>""", unsafe_allow_javascript=True)
+# NOTE: there used to be a native-theme sync here (st.html script comparing
+# Streamlit's native theme against session_state.theme, syncing via
+# localStorage, and forcing a navigation with theme/section carried across
+# it in query params). It caused an infinite reload loop once the theme
+# was pinned above, so it's removed entirely rather than patched. Native,
+# canvas-rendered widgets (e.g. st.dataframe) now just follow whatever
+# .streamlit/config.toml sets as the native theme, which is pinned to
+# light there too.
 
 full_year = len(months) == 12
 PERIOD = "year" if full_year else ("month" if len(months) == 1 else "season")
