@@ -1,0 +1,19 @@
+# Mirrors the THEMES dict in biomet_app.py. This exists only so native,
+# canvas-rendered widgets (st.dataframe) and anything else outside our own
+# CSS reach pick up matching colours. The app's own light/dark toggle stays
+# the source of truth; see the sync script next to `inject_css()` that keeps
+# this native theme in step with it.
+
+[theme.light]
+primaryColor = "#C24A20"
+backgroundColor = "#FBFAF7"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#1B2429"
+borderColor = "#E2E0DA"
+
+[theme.dark]
+primaryColor = "#D9542B"
+backgroundColor = "#0E1418"
+secondaryBackgroundColor = "#161F26"
+textColor = "#E3E9ED"
+borderColor = "#243139"
