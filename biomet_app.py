@@ -230,13 +230,14 @@ def inject_css(t):
          box instead. */
       .st-key-anom_stations_note {{ margin-top:28px; }}
 
-      /* Units and Theme, pinned in the header's top-right, to the left of
-         Streamlit's own Deploy button and menu (109px reserves their
-         width so this never overlaps them) so the pair stays on screen
-         regardless of scroll position. Radios stack vertically by
-         default; row them side by side to fit the header's height. */
+      /* Units and Theme, pinned top-left just outside the sidebar (300px
+         is Streamlit's default sidebar width; if the sidebar is dragged
+         to a different width, or collapsed, this stops lining up with its
+         edge) so the pair stays on screen regardless of scroll position.
+         Radios stack vertically by default; row them side by side to fit
+         the header's height. */
       .st-key-topbar_controls {{
-          position:fixed; top:14px; right:109px; z-index:1000000;
+          position:fixed; top:14px; left:316px; z-index:1000000;
           width:fit-content !important;
           display:flex; flex-direction:row; align-items:center;
           background:{t['line']}; border-radius:8px; padding:6px 16px; }}
@@ -431,10 +432,10 @@ with st.sidebar:
         months = list(range(1, 13))
     months = sorted(months)
 
-# Units lives top-right, pinned above the Deploy/menu row via CSS
-# (.st-key-topbar_controls), rather than in the sidebar: the one control
-# worth having on screen no matter how far the page is scrolled. The Theme
-# radio that used to sit beside it is disabled for now (see the
+# Units lives top-left, pinned just to the right of the sidebar via CSS
+# (.st-key-topbar_controls), rather than inside the sidebar itself: the one
+# control worth having on screen no matter how far the page is scrolled.
+# The Theme radio that used to sit beside it is disabled for now (see the
 # session_state.theme pin above) rather than removed, so it can be dropped
 # back in here once dark mode's native-widget gaps are fixed.
 with st.container(key="topbar_controls"):
