@@ -409,12 +409,9 @@ with st.sidebar:
     st.divider()
     st.markdown('<p class="nav-caption">Filters</p>', unsafe_allow_html=True)
 
-    if section in ("Overview", "Time series", "Anomalies"):
-        # These sections pick their stations on the page itself
-        sel_stations = all_stations
-    else:
-        sel_stations = st.multiselect("Stations", all_stations,
-                                      default=all_stations) or all_stations
+    # Every section picks its stations on the page itself now, so `df`
+    # below always starts from the full set.
+    sel_stations = all_stations
 
     years = st.slider("Years", yr_lo, yr_hi, (yr_lo, yr_hi))
 
@@ -899,10 +896,17 @@ elif section == "Anomalies":
 
 elif section == "Data":
     st.title("Data")
-    st.caption(f"{len(df):,} records \u00b7 {years[0]}\u2013{years[1]} "
+
+    # Station filter lives on the page, not the sidebar, matching the
+    # other sections.
+    st.multiselect("Stations", all_stations, default=all_stations,
+                   key="data_stations")
+    stns = st.session_state.get("data_stations") or all_stations
+
+    show = df[df["Station"].isin(stns)].copy()
+    st.caption(f"{len(show):,} records \u00b7 {years[0]}\u2013{years[1]} "
                f"\u00b7 {months_label}")
 
-    show = df.copy()
     for v, meta in VARS.items():
         if meta["kind"] in ("temp", "precip") and v in show:
             show[v] = convert(show[v], meta["kind"], metric).round(2)
