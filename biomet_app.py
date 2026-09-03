@@ -24,6 +24,7 @@ DATA_PATH = Path(__file__).parent / "ECONET_HSdata_d.csv"
 COUNTIES_PATH = Path(__file__).parent / "nc_counties.geojson"
 STATE_PENTAD_PATH = Path(__file__).parent / "state_pentad.parquet"
 CONUS_GRID_PATH = Path(__file__).parent / "conus_grid.parquet"
+STATION_PENTAD_PATH = Path(__file__).parent / "station_pentad.parquet"
 
 APP_TITLE = "Biometeorological Data Explorer"
 BASE_YEARS = (2006, 2025)      # fixed anomaly reference, never follows the filter
@@ -455,6 +456,16 @@ def load_conus_grid(path):
     return pd.read_parquet(path)
 
 
+@st.cache_data(show_spinner="Loading station pentad aggregates")
+def load_station_pentad(path):
+    """The six ECONet stations' nearest-cell pentad x year rates —
+    aggregate_cell_to_pentad() in R, the same function state_pentad.parquet's
+    own per-cell step uses, so the station and region sides of the
+    comparison are never apples to oranges. See
+    r-codes/Aggregate_station_pentad.R and pentad_lib.R."""
+    return pd.read_parquet(path)
+
+
 def aggregate(frame, var, by):
     """Aggregate honouring each variable's rule: totals sum, the rest average."""
     grouped = frame.groupby(by, observed=True)[var]
@@ -773,7 +784,9 @@ HINTS = {
     "rm_map_states":
         "Narrows the region to just these states.",
     "rm_radar":
-        "Coming soon: the region's band against up to three station windows.",
+        "Region and station profiles for the selected window and "
+        "reference period, as a plain table for now. The radar and "
+        "station picking are coming soon.",
     "rm_boxplots":
         "Coming soon: one boxplot per comparison variable, region against "
         "the selected stations.",
@@ -851,6 +864,87 @@ def region_map(state_regions, cells, active_region, active_states, height=460):
     fig.update_layout(height=height, margin=dict(l=0, r=0, t=0, b=0),
                       paper_bgcolor="rgba(0,0,0,0)", showlegend=False)
     return fig
+
+
+def pentad_of_doy(doy):
+    """Pentad index (1-73) for a day-of-year on the Window block's fixed
+    non-leap reference calendar (2001). Mirrors pentad_of() in
+    r-codes/pentad_lib.R exactly (same non-leap case; the Window slider
+    can never land on Feb 29, so the leap case never applies here) —
+    needed to turn the block's date range into the pentad bounds the
+    profile queries below filter on."""
+    return (doy - 1) // 5 + 1
+
+
+# state_pentad.parquet stores PRECTOTCORR and THI_ge_79 as rates (mean
+# mm/day, fraction of days), not totals — see GRID_VARS and CLAUDE.md,
+# "Store rates, not totals". Decision from block 4: scale these by the
+# window length in days at display time, here, rather than showing a
+# rate. DTR and interdiurnal_T2M are temperature *differences*; they need
+# convert_delta() rather than convert() wherever a profile gets displayed.
+RATE_VARS = {"PRECTOTCORR", "THI_ge_79"}
+DELTA_VARS = {"DTR", "interdiurnal_T2M"}
+
+_PROFILE_STATS = {
+    "mean": np.mean,
+    "p5":  lambda x: np.percentile(x, 5),
+    "p25": lambda x: np.percentile(x, 25),
+    "p50": lambda x: np.percentile(x, 50),
+    "p75": lambda x: np.percentile(x, 75),
+    "p95": lambda x: np.percentile(x, 95),
+}
+
+
+def _profile_stats(pentad_year, variables, win_days):
+    """pentad_year: one row per pentad x year already, one column per
+    raw variable name — the "one value per pentad per year" both
+    region_profile() and station_profile() build before calling this.
+    Returns {variable: {stat: value}}, native rate units still, before
+    convert()/convert_delta(): RATE_VARS are scaled by win_days here so
+    every caller gets a per-window quantity, not a per-day rate."""
+    out = {}
+    for v in variables:
+        x = pentad_year[v].to_numpy()
+        scale = win_days if v in RATE_VARS else 1
+        out[v] = {stat: fn(x) * scale for stat, fn in _PROFILE_STATS.items()}
+    return out
+
+
+def region_profile(state_pentad, state_weights, states, p_lo, p_hi, y_lo, y_hi,
+                   variables, win_days):
+    """Area-weighted mean across `states`' state_pentad.parquet rows,
+    weighted by each state's summed area_weight (conus_grid.parquet) —
+    a bigger, more-cells state pulls the combined series more, the same
+    way a multi-state selection should behave. Collapses to one row per
+    pentad x year first (exactly what Task 9 asks for), then to the
+    summary stats over that set."""
+    sub = state_pentad[
+        state_pentad["state"].isin(states)
+        & state_pentad["pentad"].between(p_lo, p_hi)
+        & state_pentad["year"].between(y_lo, y_hi)
+    ].copy()
+    sub["_w"] = sub["state"].map(state_weights)
+
+    grouped = sub.groupby(["pentad", "year"])
+    pentad_year = pd.DataFrame({
+        v: grouped.apply(lambda g, v=v: np.average(g[v], weights=g["_w"]))
+        for v in variables
+    })
+    return _profile_stats(pentad_year, variables, win_days)
+
+
+def station_profile(station_pentad, station, p_lo, p_hi, y_lo, y_hi,
+                    variables, win_days):
+    """A station is already a single cell's pentad x year series — no
+    collapsing step, unlike region_profile(), but the exact same window/
+    reference-period filter and the exact same _profile_stats() so the
+    two sides are comparable at all."""
+    sub = station_pentad[
+        (station_pentad["station"] == station)
+        & station_pentad["pentad"].between(p_lo, p_hi)
+        & station_pentad["year"].between(y_lo, y_hi)
+    ]
+    return _profile_stats(sub, variables, win_days)
 
 
 # ================================================================ sections ==
@@ -1137,15 +1231,19 @@ elif section == "Region Matching":
     # this section answers a national question the six-station ECONet
     # frame can't, over its own pre-aggregated input. See CLAUDE.md, "The
     # Region matching section", for the full block-by-block design.
-    if not STATE_PENTAD_PATH.exists() or not CONUS_GRID_PATH.exists():
-        st.error("state_pentad.parquet and/or conus_grid.parquet not found "
-                 "next to this script. See CLAUDE.md's R preprocessing "
-                 "section for how they're built.")
+    if (not STATE_PENTAD_PATH.exists() or not CONUS_GRID_PATH.exists()
+            or not STATION_PENTAD_PATH.exists()):
+        st.error("state_pentad.parquet, conus_grid.parquet and/or "
+                 "station_pentad.parquet not found next to this script. "
+                 "See CLAUDE.md's R preprocessing section for how they're "
+                 "built.")
         st.stop()
 
     state_pentad = load_state_pentad(STATE_PENTAD_PATH)
     grid = load_conus_grid(CONUS_GRID_PATH)
+    station_pentad = load_station_pentad(STATION_PENTAD_PATH)
     state_regions = grid.drop_duplicates("state")[["state", "region"]]
+    state_weights = grid.groupby("state")["area_weight"].sum()
 
     with st.container(key="rm_block_reference"), \
          st.expander("1. Reference period", expanded=True):
@@ -1242,8 +1340,52 @@ elif section == "Region Matching":
                         width=W, config={"displayModeBar": False})
 
     with st.container(key="rm_block_radar"), \
-         st.expander("6. Radar and station selection", expanded=False):
+         st.expander("6. Radar and station selection", expanded=True):
         st.caption(HINTS["rm_radar"])
+
+        if rm_source == "ECONet":
+            st.warning("The station profile below always uses the grid "
+                      "cell (MERRA-2), regardless of this setting. An "
+                      "ECONet-measurements pentad aggregation does not "
+                      "exist yet.")
+
+        if len(rm_vars) == 0:
+            st.info("Select at least one variable in block 4 to see profiles.")
+        else:
+            p_lo = pentad_of_doy(rm_window[0].timetuple().tm_yday)
+            p_hi = pentad_of_doy(rm_window[1].timetuple().tm_yday)
+            y_lo, y_hi = rm_ref_years
+            selected_states = rm_states if rm_states else region_states
+            all_stations = sorted(station_pentad["station"].unique())
+
+            region_stats = region_profile(
+                state_pentad, state_weights, selected_states,
+                p_lo, p_hi, y_lo, y_hi, rm_vars, win_days)
+            station_stats = {
+                stn: station_profile(station_pentad, stn, p_lo, p_hi, y_lo,
+                                     y_hi, rm_vars, win_days)
+                for stn in all_stations
+            }
+
+            rows = []
+            for v in rm_vars:
+                meta = GRID_VARS[v]
+                conv = convert_delta if v in DELTA_VARS else convert
+                label = f"{meta['label']}{unit_suffix(meta['kind'], metric)}"
+                for stat in ["mean", "p5", "p25", "p50", "p75", "p95"]:
+                    rec = {"Variable": label, "Stat": stat,
+                          "Region": round(conv(region_stats[v][stat],
+                                              meta["kind"], metric), 2)}
+                    for stn in all_stations:
+                        rec[stn] = round(conv(station_stats[stn][v][stat],
+                                             meta["kind"], metric), 2)
+                    rows.append(rec)
+
+            st.dataframe(pd.DataFrame(rows), width=W, hide_index=True)
+            st.caption(f"{p_lo}–{p_hi} pentads ({win_days} days) · "
+                      f"{y_lo}–{y_hi} · "
+                      f"{len(selected_states)} state"
+                      f"{'s' if len(selected_states) != 1 else ''} in region")
 
     with st.container(key="rm_block_boxplots"), \
          st.expander("7. Boxplots", expanded=False):
