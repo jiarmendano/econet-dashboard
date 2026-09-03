@@ -374,7 +374,7 @@ GRID_VARS = {
     "interdiurnal_T2M": dict(label="Day to day temperature change", kind="temp",   default=True),
     "T2MDEW":           dict(label="Dew point",                     kind="temp",   default=True),
     "PRECTOTCORR":      dict(label="Precipitation",                 kind="precip", default=True),
-    "THI_ge_79":        dict(label="Days THI ≥ 79",            kind="days",   default=True),
+    "THI_ge_79":        dict(label="Days THImax ≥ 79",         kind="days",   default=True),
     "THImax":           dict(label="Maximum THI",                   kind="index",  default=False),
     "RHmed":            dict(label="Mean relative humidity",        kind="pct",    default=False),
 }
@@ -784,9 +784,8 @@ HINTS = {
     "rm_map_states":
         "Narrows the region to just these states.",
     "rm_radar":
-        "Region and station profiles for the selected window and "
-        "reference period, as a plain table for now. The radar and "
-        "station picking are coming soon.",
+        "Region average conditions against up to three stations, on a "
+        "percentile radar. Automatic best-match search is coming soon.",
     "rm_boxplots":
         "Coming soon: one boxplot per comparison variable, region against "
         "the selected stations.",
@@ -1059,7 +1058,7 @@ def coverage(region_py, station_pentad, station, p_lo, p_hi, y_lo, y_hi, variabl
     region) scores the same as a perfect match. Per variable, the pooled
     fraction of the region's pentad x year values that fall inside the
     station's own pooled p5-p95 for the whole window. Feeds the radar's
-    red segments (not built yet); a separate question from
+    red segments (region_radar()); a separate question from
     climate_dissimilarity(), not a component of it, so it is not summed
     into a total here."""
     sta_py = station_pentad_year(station_pentad, station, p_lo, p_hi, y_lo, y_hi)
@@ -1071,6 +1070,170 @@ def coverage(region_py, station_pentad, station, p_lo, p_hi, y_lo, y_hi, variabl
         out[v] = float(np.mean((region_vals >= sta_p5) & (region_vals <= sta_p95)))
 
     return out
+
+
+def _avg_conus_percentile(value, variable, conus_scale, p_lo, p_hi):
+    """A single raw value's CONUS percentile rank, averaged across every
+    pentad in the window. Positions a pooled p5/p95 on the radar's radial
+    axis the same way climate_dissimilarity() runs a pooled value through
+    every pentad's own scale in turn -- a raw value means a different
+    thing in January than in July -- but returns the value's own average
+    position rather than an already-differenced gap, since the radar
+    needs to place two separate rings, not one number."""
+    pcts = []
+    for p in range(p_lo, p_hi + 1):
+        scale = conus_scale[variable].get(p)
+        if scale is not None and len(scale):
+            pcts.append(_percentile_of(value, scale))
+    return float(np.mean(pcts)) if pcts else np.nan
+
+
+# Percentile 0 is deliberately not the radar's true centre: a hole big
+# enough that an uncovered inner tail near the national 0th percentile
+# stays readable instead of collapsing into an unreadable point.
+RADAR_HOLE = 0.25
+RADAR_MAX = 1.0
+
+
+def _pct_to_r(pct):
+    return RADAR_HOLE + (RADAR_MAX - RADAR_HOLE) * pct / 100
+
+
+# Off for now: a real but tiny gap (well under 1-2 percentile points --
+# e.g. GOLD vs North Carolina on T2M/DTR/T2MDEW) draws as two overlapping
+# end-cap markers with no visible line between them, which reads as a
+# stray dot/error rather than "basically covered," on exactly the axes
+# where the station is a good match. Needs a minimum-gap threshold or a
+# different visual language (e.g. a thin tick instead of a thick capped
+# segment) before turning back on -- the geometry itself is correct
+# (verified against the raw coverage()/percentile numbers).
+RADAR_SHOW_ALERTS = False
+
+
+def region_radar(variables, region_py, station_pentad, stations, focus,
+                 conus_scale, p_lo, p_hi, y_lo, y_hi, height=520):
+    """The percentile radar. One axis per variable, fixed order (the
+    caller's `variables` order, not selection order, so it doesn't
+    reshuffle between reruns). Radial scale is the CONUS percentile,
+    0-100, with RADAR_HOLE's hole at the centre -- see there. Region
+    average conditions is a filled, low-opacity, thin-outlined band from
+    its pooled p5 to its pooled p95; each of `stations` (up to three,
+    STATION_COLORS) is the same band unfilled, dashed on both edges, so
+    it reads as an envelope meant to enclose the region. Alert segments —
+    thick, round-capped (faked with matching end markers; Plotly line
+    traces don't expose a cap style), in the accent colour, both tails,
+    driven by coverage()'s own asymmetric direction (region beyond
+    station) rather than climate_dissimilarity()'s symmetric gap, so a
+    station much wider than the region draws no segment — are built but
+    gated off by RADAR_SHOW_ALERTS (see there for why: a real but tiny
+    gap reads as a stray dot, not an alert, on exactly the axes where a
+    station is a good match). An axis where neither the region nor any
+    shown station varies at all is greyed (CLAUDE.md, "no meaningful
+    variation ... on either side"). All colours from THEMES/STATION_COLORS;
+    nothing hard-coded."""
+    n = len(variables)
+    angles = [i * 360 / n for i in range(n)]
+
+    def pooled_pct(py, v):
+        lo, hi = np.percentile(py[v], [5, 95])
+        return (_avg_conus_percentile(lo, v, conus_scale, p_lo, p_hi),
+                _avg_conus_percentile(hi, v, conus_scale, p_lo, p_hi))
+
+    region_pct = {v: pooled_pct(region_py, v) for v in variables}
+
+    station_py = {stn: station_pentad_year(station_pentad, stn, p_lo, p_hi, y_lo, y_hi)
+                 for stn in stations}
+    station_pct = {stn: {v: pooled_pct(station_py[stn], v) for v in variables}
+                  for stn in stations}
+
+    greyed = set()
+    for v in variables:
+        region_flat = np.isclose(*np.percentile(region_py[v], [5, 95]))
+        stations_flat = all(np.isclose(*np.percentile(station_py[stn][v], [5, 95]))
+                            for stn in stations) if stations else True
+        if region_flat and stations_flat:
+            greyed.add(v)
+
+    fig = go.Figure()
+
+    # Region average conditions: two independently CLOSED polygons (same
+    # construction as each station's outer/inner loops below, which is
+    # why those close cleanly on every axis), with Plotly filling the gap
+    # between consecutive traces via fill="tonext" rather than one path
+    # threading both boundaries with a seam. Two earlier attempts built a
+    # single outer+inner path instead (closing the outer loop before
+    # jumping to inner, then removing that closing point) and each moved
+    # a rendering seam to a different vertex rather than removing it --
+    # tonext between two separately closed loops has no seam to place.
+    # Order matters: the inner (no-fill) loop must be added first, so the
+    # outer trace right after it has something to fill "toward".
+    outer = [_pct_to_r(region_pct[v][1]) for v in variables]
+    inner = [_pct_to_r(region_pct[v][0]) for v in variables]
+    theta_closed = angles + [angles[0]]
+    fig.add_trace(go.Scatterpolar(
+        r=inner + [inner[0]], theta=theta_closed, mode="lines",
+        line=dict(color=T["accent"], width=1.5),
+        showlegend=False, hoverinfo="skip"))
+    fig.add_trace(go.Scatterpolar(
+        r=outer + [outer[0]], theta=theta_closed, mode="lines", fill="tonext",
+        fillcolor=T["accent_soft"], opacity=0.6,
+        line=dict(color=T["accent"], width=1.5),
+        name="Region average conditions", hoverinfo="skip"))
+
+    for i, stn in enumerate(stations):
+        c = STATION_COLORS[i % len(STATION_COLORS)]
+        outer_s = [_pct_to_r(station_pct[stn][v][1]) for v in variables]
+        inner_s = [_pct_to_r(station_pct[stn][v][0]) for v in variables]
+        theta_closed = angles + [angles[0]]
+        fig.add_trace(go.Scatterpolar(
+            r=outer_s + [outer_s[0]], theta=theta_closed, mode="lines",
+            line=dict(color=c, width=2, dash="dash"),
+            name=stn, legendgroup=stn, hoverinfo="skip"))
+        fig.add_trace(go.Scatterpolar(
+            r=inner_s + [inner_s[0]], theta=theta_closed, mode="lines",
+            line=dict(color=c, width=2, dash="dash"),
+            name=stn, legendgroup=stn, showlegend=False, hoverinfo="skip"))
+
+    if RADAR_SHOW_ALERTS and focus in station_pct:
+        for i, v in enumerate(variables):
+            r5_pct, r95_pct = region_pct[v]
+            s5_pct, s95_pct = station_pct[focus][v]
+            lo_gap = s5_pct - r5_pct     # region reaches below the station's floor
+            hi_gap = r95_pct - s95_pct   # region reaches above the station's ceiling
+            for gap, a, b in ((lo_gap, r5_pct, s5_pct), (hi_gap, s95_pct, r95_pct)):
+                if gap > 0:
+                    r_ab = [_pct_to_r(a), _pct_to_r(b)]
+                    fig.add_trace(go.Scatterpolar(
+                        r=r_ab, theta=[angles[i], angles[i]], mode="lines+markers",
+                        line=dict(color=T["accent"], width=7),
+                        marker=dict(color=T["accent"], size=8, symbol="circle"),
+                        showlegend=False, hoverinfo="skip"))
+
+    ticktext = [
+        f'<span style="color:{T["muted"]}">{GRID_VARS[v]["label"]}</span>'
+        if v in greyed else GRID_VARS[v]["label"]
+        for v in variables
+    ]
+    fig.update_layout(
+        height=height, showlegend=True,
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color=T["text"]),
+        legend=dict(orientation="h", yanchor="top", y=-0.1, x=0),
+        polar=dict(
+            bgcolor="rgba(0,0,0,0)",
+            radialaxis=dict(
+                range=[0, RADAR_MAX], showline=True, linecolor=T["line"],
+                tickvals=[RADAR_HOLE, _pct_to_r(50), RADAR_MAX],
+                ticktext=["0", "50", "100"],
+                gridcolor=T["line"], tickfont=dict(color=T["muted"])),
+            angularaxis=dict(
+                tickvals=angles, ticktext=ticktext,
+                direction="clockwise", rotation=90,
+                gridcolor=T["line"], linecolor=T["line"],
+                tickfont=dict(color=T["text"])),
+        ),
+        margin=dict(l=40, r=40, t=30, b=10))
+    return fig
 
 
 # ================================================================ sections ==
@@ -1476,75 +1639,78 @@ elif section == "Region Matching":
                       "exist yet.")
 
         if len(rm_vars) == 0:
-            st.info("Select at least one variable in block 4 to see profiles.")
+            st.info("Select at least one variable in block 4 to see the radar.")
         else:
             p_lo = pentad_of_doy(rm_window[0].timetuple().tm_yday)
             p_hi = pentad_of_doy(rm_window[1].timetuple().tm_yday)
             y_lo, y_hi = rm_ref_years
             selected_states = rm_states if rm_states else region_states
             all_stations = sorted(station_pentad["station"].unique())
-
-            region_stats = region_profile(
-                state_pentad, state_weights, selected_states,
-                p_lo, p_hi, y_lo, y_hi, rm_vars, win_days)
-            station_stats = {
-                stn: station_profile(station_pentad, stn, p_lo, p_hi, y_lo,
-                                     y_hi, rm_vars, win_days)
-                for stn in all_stations
-            }
-
-            rows = []
-            for v in rm_vars:
-                meta = GRID_VARS[v]
-                conv = convert_delta if v in DELTA_VARS else convert
-                label = f"{meta['label']}{unit_suffix(meta['kind'], metric)}"
-                for stat in ["mean", "p5", "p25", "p50", "p75", "p95"]:
-                    rec = {"Variable": label, "Stat": stat,
-                          "Region": round(conv(region_stats[v][stat],
-                                              meta["kind"], metric), 2)}
-                    for stn in all_stations:
-                        rec[stn] = round(conv(station_stats[stn][v][stat],
-                                             meta["kind"], metric), 2)
-                    rows.append(rec)
-
-            st.dataframe(pd.DataFrame(rows), width=W, hide_index=True)
-            st.caption(f"{p_lo}–{p_hi} pentads ({win_days} days) · "
-                      f"{y_lo}–{y_hi} · "
-                      f"{len(selected_states)} state"
-                      f"{'s' if len(selected_states) != 1 else ''} in region")
-
-            st.markdown("##### Climate dissimilarity")
-            st.caption("Lower is better: zero means the station's band "
-                      "matches the region's exactly on every selected "
-                      "axis. Each variable's column is its contribution "
-                      "(in CONUS percentile units) to that row's total, "
-                      "not a raw value — this is what makes a single "
-                      "dominant axis, or a shared-absence artefact, "
-                      "visible rather than buried in one number. "
-                      "Symmetric: a station much wider than the region "
-                      "is penalised here too, unlike coverage (MESS "
-                      "itself), which will drive the radar's red "
-                      "segments separately once it's built.")
+            # Fixed order every render: the caller's declared GRID_VARS order,
+            # not multiselect selection order, which can reshuffle on rerun.
+            ordered_vars = [v for v in GRID_VARS if v in rm_vars]
 
             region_py = region_pentad_year(state_pentad, state_weights,
                                            selected_states, p_lo, p_hi,
-                                           y_lo, y_hi, rm_vars)
+                                           y_lo, y_hi, ordered_vars)
             scale = conus_percentile_scale(y_lo, y_hi)
-            dissim = {
-                stn: climate_dissimilarity(region_py, station_pentad, stn, scale,
-                                          p_lo, p_hi, y_lo, y_hi, rm_vars)
-                for stn in all_stations
-            }
 
-            dissim_rows = []
-            for stn in all_stations:
-                rec = {"Station": stn}
-                for v in rm_vars:
-                    rec[GRID_VARS[v]["label"]] = round(dissim[stn][v]["dissimilarity"], 1)
-                rec["Total"] = round(dissim[stn]["total"], 1)
-                dissim_rows.append(rec)
-            dissim_table = pd.DataFrame(dissim_rows).sort_values("Total").reset_index(drop=True)
-            st.dataframe(dissim_table, width=W, hide_index=True)
+            radar_col, control_col = st.columns([3, 2])
+
+            with control_col:
+                st.session_state.setdefault("rm_focus_stations", [all_stations[0]])
+                st.multiselect("Stations (up to 3)", all_stations, max_selections=3,
+                               key="rm_focus_stations")
+                focus_stations = st.session_state.get("rm_focus_stations") or []
+
+                # The focus picker only matters for the alert segments,
+                # currently off (RADAR_SHOW_ALERTS) -- showing a control
+                # with no visible effect would be worse than not showing
+                # it, so it's gated the same way.
+                if RADAR_SHOW_ALERTS and len(focus_stations) > 1:
+                    if st.session_state.get("rm_focus") not in focus_stations:
+                        st.session_state.rm_focus = focus_stations[0]
+                    st.radio("Focus (alert segments)", focus_stations, key="rm_focus")
+                    focused = st.session_state.rm_focus
+                elif focus_stations:
+                    focused = focus_stations[0]
+                else:
+                    focused = None
+
+            with radar_col:
+                fig = region_radar(ordered_vars, region_py, station_pentad,
+                                   focus_stations, focused, scale,
+                                   p_lo, p_hi, y_lo, y_hi)
+                st.plotly_chart(fig, width=W, config={"displayModeBar": False})
+                st.caption(f"{p_lo}–{p_hi} pentads ({win_days} days) · "
+                          f"{y_lo}–{y_hi} · {len(selected_states)} state"
+                          f"{'s' if len(selected_states) != 1 else ''} in region "
+                          f"average conditions")
+
+            with control_col:
+                if focus_stations:
+                    cov_by_stn = {
+                        stn: coverage(region_py, station_pentad, stn,
+                                     p_lo, p_hi, y_lo, y_hi, ordered_vars)
+                        for stn in focus_stations
+                    }
+                    dis_by_stn = {
+                        stn: climate_dissimilarity(region_py, station_pentad, stn, scale,
+                                                  p_lo, p_hi, y_lo, y_hi, ordered_vars)
+                        for stn in focus_stations
+                    }
+                    rows = []
+                    for v in ordered_vars:
+                        rec = {"Variable": GRID_VARS[v]["label"]}
+                        for stn in focus_stations:
+                            rec[f"{stn} coverage"] = round(cov_by_stn[stn][v], 2)
+                            rec[f"{stn} contribution"] = round(
+                                dis_by_stn[stn][v]["dissimilarity"], 1)
+                        rows.append(rec)
+                    st.dataframe(pd.DataFrame(rows), width=W, hide_index=True)
+                    st.caption("Coverage: share of region average conditions inside "
+                              "the station's band (MESS). Contribution: that "
+                              "variable's share of climate_dissimilarity's total.")
 
     with st.container(key="rm_block_boxplots"), \
          st.expander("7. Boxplots", expanded=False):
