@@ -3,5 +3,7 @@ __pycache__/
 
 .claude/
 .agents/
+CLAUDE.md
 
 notes/
+r-codes/
