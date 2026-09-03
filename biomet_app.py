@@ -910,14 +910,16 @@ def _profile_stats(pentad_year, variables, win_days):
     return out
 
 
-def region_profile(state_pentad, state_weights, states, p_lo, p_hi, y_lo, y_hi,
-                   variables, win_days):
+def region_pentad_year(state_pentad, state_weights, states, p_lo, p_hi, y_lo, y_hi,
+                       variables):
     """Area-weighted mean across `states`' state_pentad.parquet rows,
     weighted by each state's summed area_weight (conus_grid.parquet) —
     a bigger, more-cells state pulls the combined series more, the same
     way a multi-state selection should behave. Collapses to one row per
-    pentad x year first (exactly what Task 9 asks for), then to the
-    summary stats over that set."""
+    pentad x year (exactly what Task 9 asks for) and stops there: the
+    shared building block behind both region_profile() (pooled stats
+    over the whole window) and climate_dissimilarity()/coverage()
+    (per-pentad stats)."""
     sub = state_pentad[
         state_pentad["state"].isin(states)
         & state_pentad["pentad"].between(p_lo, p_hi)
@@ -926,25 +928,149 @@ def region_profile(state_pentad, state_weights, states, p_lo, p_hi, y_lo, y_hi,
     sub["_w"] = sub["state"].map(state_weights)
 
     grouped = sub.groupby(["pentad", "year"])
-    pentad_year = pd.DataFrame({
+    return pd.DataFrame({
         v: grouped.apply(lambda g, v=v: np.average(g[v], weights=g["_w"]))
         for v in variables
-    })
+    }).reset_index()   # -> plain "pentad", "year" columns, not a MultiIndex
+
+
+def region_profile(state_pentad, state_weights, states, p_lo, p_hi, y_lo, y_hi,
+                   variables, win_days):
+    """Pooled p5/p25/p50/p75/p95/mean over the whole window -- see
+    region_pentad_year() for the per-pentad series this collapses."""
+    pentad_year = region_pentad_year(state_pentad, state_weights, states,
+                                     p_lo, p_hi, y_lo, y_hi, variables)
     return _profile_stats(pentad_year, variables, win_days)
 
 
-def station_profile(station_pentad, station, p_lo, p_hi, y_lo, y_hi,
-                    variables, win_days):
-    """A station is already a single cell's pentad x year series — no
-    collapsing step, unlike region_profile(), but the exact same window/
-    reference-period filter and the exact same _profile_stats() so the
-    two sides are comparable at all."""
-    sub = station_pentad[
+def station_pentad_year(station_pentad, station, p_lo, p_hi, y_lo, y_hi):
+    """A station is already a single cell's pentad x year series in
+    station_pentad.parquet -- no collapsing step, unlike
+    region_pentad_year(), just the same window/reference-period filter."""
+    return station_pentad[
         (station_pentad["station"] == station)
         & station_pentad["pentad"].between(p_lo, p_hi)
         & station_pentad["year"].between(y_lo, y_hi)
     ]
+
+
+def station_profile(station_pentad, station, p_lo, p_hi, y_lo, y_hi,
+                    variables, win_days):
+    """Pooled p5/p25/p50/p75/p95/mean over the whole window, the exact
+    same shape region_profile() returns so the two sides are comparable
+    at all."""
+    sub = station_pentad_year(station_pentad, station, p_lo, p_hi, y_lo, y_hi)
     return _profile_stats(sub, variables, win_days)
+
+
+@st.cache_data(show_spinner="Building the national percentile scale")
+def conus_percentile_scale(y_lo, y_hi):
+    """The fixed yardstick climate_dissimilarity() converts every raw
+    p5/p95 onto: for each variable and each pentad, the sorted array of
+    all 48 states' state_pentad.parquet values in that pentad, over the
+    given reference period. A gap expressed in these units is comparable
+    across variables with entirely different native magnitudes (a THI
+    point is not a mm). Computed once per reference period and cached
+    (Task 10's own instruction), not rebuilt on every score call; reloads
+    state_pentad.parquet via load_state_pentad() rather than taking it as
+    an argument so Streamlit hashes two ints, not a 122k-row frame."""
+    sp = load_state_pentad(STATE_PENTAD_PATH)
+    sub = sp[sp["year"].between(y_lo, y_hi)]
+    return {
+        v: sub.groupby("pentad")[v].apply(lambda s: np.sort(s.to_numpy())).to_dict()
+        for v in GRID_VARS
+    }
+
+
+def _percentile_of(value, sorted_arr):
+    """Empirical percentile (0-100): share of a variable x pentad's
+    CONUS distribution at or below `value`."""
+    if len(sorted_arr) == 0:
+        return np.nan
+    return 100 * np.searchsorted(sorted_arr, value, side="right") / len(sorted_arr)
+
+
+def climate_dissimilarity(region_py, station_pentad, station, conus_scale,
+                          p_lo, p_hi, y_lo, y_hi, variables):
+    """Climate analogue dissimilarity: "how alike are these two
+    climates" -- the score that ranks the six stations. Replaces what
+    this file used to call mess_score(). Per variable:
+
+        |region_p5 - station_p5| + |region_p95 - station_p95|
+
+    both pooled over the whole window (the same single band coverage()
+    and the eventual radar use), each side run through every pentad's
+    own CONUS percentile scale in turn (a raw value means a different
+    thing in January than in July, so the seasonal yardstick still has
+    to be per pentad even though the band being measured against it does
+    not) and averaged -- not summed -- over the window's pentads, then
+    summed across `variables` for the station's total. Cite: Grenier et
+    al. 2013, J. Appl. Meteor. Climatol. 52:4, for this choice of metric.
+
+    Why this replaced the old score, for the record: the old one summed
+    only the region's uncovered tails (asymmetric, MESS-derived), which
+    saturates. Once the region fell fully outside the station's range on
+    every pentad, the region's own value cancelled out of the
+    *between-station* difference and the score stopped depending on the
+    region at all -- interdiurnal_T2M landed on exactly 9.5238 in 29 of
+    48 states, driven entirely by which two stations were being
+    compared, not by the region. It also ignored over-coverage
+    entirely (a station far *wider* than the region scored the same as
+    a perfect match), which is why PRECTOTCORR was blind in about half
+    the country in every window tested. The symmetric absolute-difference
+    form here penalises both a station too narrow to cover the region
+    and one much wider than it, and an all-|.| sum of two non-negative,
+    unbounded terms does not saturate the same way.
+
+    Coverage -- genuine MESS, Elith, Kearney & Phillips (2010), the
+    asymmetric "does the station's range contain the region's" -- is a
+    separate function now, coverage(): a different question, not a
+    component of this one."""
+    sta_py = station_pentad_year(station_pentad, station, p_lo, p_hi, y_lo, y_hi)
+
+    out = {"total": 0.0}
+    for v in variables:
+        sta_p5, sta_p95 = np.percentile(sta_py[v], [5, 95])
+        region_p5, region_p95 = np.percentile(region_py[v], [5, 95])
+
+        pentad_dissim = []
+        for p in range(p_lo, p_hi + 1):
+            scale = conus_scale[v].get(p)
+            if scale is None or len(scale) == 0:
+                continue
+            r5_pct  = _percentile_of(region_p5, scale)
+            r95_pct = _percentile_of(region_p95, scale)
+            s5_pct  = _percentile_of(sta_p5, scale)
+            s95_pct = _percentile_of(sta_p95, scale)
+            pentad_dissim.append(abs(r5_pct - s5_pct) + abs(r95_pct - s95_pct))
+
+        dissim = float(np.mean(pentad_dissim)) if pentad_dissim else 0.0
+        out[v] = {"dissimilarity": dissim}
+        out["total"] += dissim
+
+    return out
+
+
+def coverage(region_py, station_pentad, station, p_lo, p_hi, y_lo, y_hi, variables):
+    """Genuine MESS (Elith, Kearney & Phillips 2010): "does the station's
+    range contain the region's?" Reference = station, projection =
+    region (CLAUDE.md), asymmetric by design -- unlike
+    climate_dissimilarity(), over-coverage (station wider than the
+    region) scores the same as a perfect match. Per variable, the pooled
+    fraction of the region's pentad x year values that fall inside the
+    station's own pooled p5-p95 for the whole window. Feeds the radar's
+    red segments (not built yet); a separate question from
+    climate_dissimilarity(), not a component of it, so it is not summed
+    into a total here."""
+    sta_py = station_pentad_year(station_pentad, station, p_lo, p_hi, y_lo, y_hi)
+
+    out = {}
+    for v in variables:
+        sta_p5, sta_p95 = np.percentile(sta_py[v], [5, 95])
+        region_vals = region_py[v].to_numpy()
+        out[v] = float(np.mean((region_vals >= sta_p5) & (region_vals <= sta_p95)))
+
+    return out
 
 
 # ================================================================ sections ==
@@ -1386,6 +1512,39 @@ elif section == "Region Matching":
                       f"{y_lo}–{y_hi} · "
                       f"{len(selected_states)} state"
                       f"{'s' if len(selected_states) != 1 else ''} in region")
+
+            st.markdown("##### Climate dissimilarity")
+            st.caption("Lower is better: zero means the station's band "
+                      "matches the region's exactly on every selected "
+                      "axis. Each variable's column is its contribution "
+                      "(in CONUS percentile units) to that row's total, "
+                      "not a raw value — this is what makes a single "
+                      "dominant axis, or a shared-absence artefact, "
+                      "visible rather than buried in one number. "
+                      "Symmetric: a station much wider than the region "
+                      "is penalised here too, unlike coverage (MESS "
+                      "itself), which will drive the radar's red "
+                      "segments separately once it's built.")
+
+            region_py = region_pentad_year(state_pentad, state_weights,
+                                           selected_states, p_lo, p_hi,
+                                           y_lo, y_hi, rm_vars)
+            scale = conus_percentile_scale(y_lo, y_hi)
+            dissim = {
+                stn: climate_dissimilarity(region_py, station_pentad, stn, scale,
+                                          p_lo, p_hi, y_lo, y_hi, rm_vars)
+                for stn in all_stations
+            }
+
+            dissim_rows = []
+            for stn in all_stations:
+                rec = {"Station": stn}
+                for v in rm_vars:
+                    rec[GRID_VARS[v]["label"]] = round(dissim[stn][v]["dissimilarity"], 1)
+                rec["Total"] = round(dissim[stn]["total"], 1)
+                dissim_rows.append(rec)
+            dissim_table = pd.DataFrame(dissim_rows).sort_values("Total").reset_index(drop=True)
+            st.dataframe(dissim_table, width=W, hide_index=True)
 
     with st.container(key="rm_block_boxplots"), \
          st.expander("7. Boxplots", expanded=False):
