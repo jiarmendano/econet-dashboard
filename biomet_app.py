@@ -8,7 +8,9 @@ Run with:
 Expects ECONET_HSdata_d.csv next to this file, or set DATA_PATH below.
 """
 
+import html
 import json
+from datetime import date, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -21,6 +23,8 @@ import streamlit as st
 
 DATA_PATH = Path(__file__).parent / "ECONET_HSdata_d.csv"
 COUNTIES_PATH = Path(__file__).parent / "nc_counties.geojson"
+STATE_PENTAD_PATH = Path(__file__).parent / "state_pentad.parquet"
+CONUS_GRID_PATH = Path(__file__).parent / "conus_grid.parquet"
 
 APP_TITLE = "Biometeorological Data Explorer"
 BASE_YEARS = (2006, 2025)      # fixed anomaly reference, never follows the filter
@@ -39,22 +43,27 @@ W = "stretch"
 
 # ----------------------------------------------------------------- theme ----
 
+# Okabe-Ito, colourblind safe, one per station. Defined before THEMES so the
+# region map (5 USDA-ARS regions, one fewer than there are stations) can
+# reuse the same vetted palette through THEMES rather than a second
+# hard-coded list — see region_colors below.
+STATION_COLORS = ["#E69F00", "#56B4E9", "#009E73",
+                  "#CC79A7", "#0072B2", "#D55E00"]
+
 THEMES = {
     "dark": dict(
         bg="#0E1418", panel="#161F26", line="#243139",
         text="#E3E9ED", muted="#94A5B0", accent="#D9542B",
         accent_soft="#3A2119", grid="#1E2A32", template="plotly_dark",
+        region_colors=STATION_COLORS[:5],
     ),
     "light": dict(
         bg="#FBFAF7", panel="#FFFFFF", line="#E2E0DA",
         text="#1B2429", muted="#535E67", accent="#C24A20",
         accent_soft="#F7E4DC", grid="#EDEBE5", template="plotly_white",
+        region_colors=STATION_COLORS[:5],
     ),
 }
-
-# Okabe-Ito, colourblind safe, one per station
-STATION_COLORS = ["#E69F00", "#56B4E9", "#009E73",
-                  "#CC79A7", "#0072B2", "#D55E00"]
 
 # Livestock Weather Safety Index thresholds: alert, danger, emergency
 THRESHOLD_COLORS = {"THI75": "#E7CA45", "THI79": "#F68B00", "THI84": "#9A3C41"}
@@ -67,7 +76,32 @@ ANOM_PRECIP = ("#2A9D8F", "#A6771C")   # (positive = wetter, negative = drier)
 MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
                "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
-NAV = ["Overview", "Time series", "Anomalies", "Data"]
+# USDA-ARS regions, canonical order (matches conus_grid.parquet / CLAUDE.md).
+REGIONS = ["Northeast", "Southeast", "Midwest", "Plains", "Pacific West"]
+
+# Standard postal codes, needed for Plotly's locationmode="USA-states" —
+# conus_grid.parquet only carries full state names.
+STATE_ABBR = {
+    "Alabama": "AL", "Alaska": "AK", "Arizona": "AZ", "Arkansas": "AR",
+    "California": "CA", "Colorado": "CO", "Connecticut": "CT", "Delaware": "DE",
+    "District of Columbia": "DC", "Florida": "FL", "Georgia": "GA",
+    "Hawaii": "HI", "Idaho": "ID", "Illinois": "IL", "Indiana": "IN",
+    "Iowa": "IA", "Kansas": "KS", "Kentucky": "KY", "Louisiana": "LA",
+    "Maine": "ME", "Maryland": "MD", "Massachusetts": "MA", "Michigan": "MI",
+    "Minnesota": "MN", "Mississippi": "MS", "Missouri": "MO", "Montana": "MT",
+    "Nebraska": "NE", "Nevada": "NV", "New Hampshire": "NH", "New Jersey": "NJ",
+    "New Mexico": "NM", "New York": "NY", "North Carolina": "NC",
+    "North Dakota": "ND", "Ohio": "OH", "Oklahoma": "OK", "Oregon": "OR",
+    "Pennsylvania": "PA", "Rhode Island": "RI", "South Carolina": "SC",
+    "South Dakota": "SD", "Tennessee": "TN", "Texas": "TX", "Utah": "UT",
+    "Vermont": "VT", "Virginia": "VA", "Washington": "WA",
+    "West Virginia": "WV", "Wisconsin": "WI", "Wyoming": "WY",
+}
+
+# "Data" is hidden from the nav (Region Matching took its slot) but its
+# elif branch below is untouched and still reachable — restore the name
+# here to bring it back.
+NAV = ["Overview", "Time series", "Anomalies", "Region Matching"]
 
 
 def inject_css(t):
@@ -230,6 +264,14 @@ def inject_css(t):
          box instead. */
       .st-key-anom_stations_note {{ margin-top:28px; }}
 
+      /* Region Matching's 7 blocks get the same expander-header weight
+         Overview's two section expanders use, but as one attribute-prefix
+         selector instead of Overview's enumerated pair — 7 keys in a
+         comma list would be unwieldy where 2 isn't. */
+      [class*="st-key-rm_block_"] > div[data-testid="stLayoutWrapper"]
+          > div[data-testid="stExpander"] > details > summary p {{
+          font-size:1.125rem; font-weight:600; letter-spacing:-.01em; }}
+
       /* Units and Theme, pinned top-left just outside the sidebar (300px
          is Streamlit's default sidebar width; if the sidebar is dragged
          to a different width, or collapsed, this stops lining up with its
@@ -353,6 +395,23 @@ def load_counties(path):
         return json.load(f)
 
 
+@st.cache_data(show_spinner="Loading state/pentad aggregates")
+def load_state_pentad(path):
+    """Region Matching's only input besides the grid — one row per
+    state x pentad x year, already collapsed from the per-cell grid in R.
+    See CLAUDE.md, 'Region matching section', for why the collapse
+    happens there and not here."""
+    return pd.read_parquet(path)
+
+
+@st.cache_data(show_spinner="Loading grid cells")
+def load_conus_grid(path):
+    """Grid point coordinates plus each cell's state/region/area weight,
+    used only for the map — Region Matching's actual numbers all come
+    from load_state_pentad(), never from an individual cell."""
+    return pd.read_parquet(path)
+
+
 def aggregate(frame, var, by):
     """Aggregate honouring each variable's rule: totals sum, the rest average."""
     grouped = frame.groupby(by, observed=True)[var]
@@ -407,23 +466,31 @@ st.session_state.setdefault("kpi_station", all_stations[0])
 
 with st.sidebar:
     st.divider()
-    st.markdown('<p class="nav-caption">Filters</p>', unsafe_allow_html=True)
 
-    # Every section picks its stations on the page itself now, so `df`
-    # below always starts from the full set.
-    sel_stations = all_stations
+    # Wrapped in its own keyed container, always built regardless of
+    # section, so it can be hidden with CSS on Region Matching (below,
+    # near inject_css) without ever skipping the widgets themselves.
+    # Skipping them would drop their session_state and reset the user's
+    # selection on the way back to Time series/Anomalies — the same class
+    # of desync already documented for the multiselect and trend-rate keys.
+    with st.container(key="sidebar_filters"):
+        st.markdown('<p class="nav-caption">Filters</p>', unsafe_allow_html=True)
 
-    years = st.slider("Years", yr_lo, yr_hi, (yr_lo, yr_hi))
+        # Every section picks its stations on the page itself now, so `df`
+        # below always starts from the full set.
+        sel_stations = all_stations
 
-    st.session_state.setdefault("months_sel", list(range(1, 13)))
-    months = st.pills("Months", list(range(1, 13)), selection_mode="multi",
-                      key="months_sel",
-                      format_func=lambda m: MONTH_NAMES[m - 1])
+        years = st.slider("Years", yr_lo, yr_hi, (yr_lo, yr_hi))
 
-    all_selected = len(st.session_state.months_sel or []) == 12
-    st.button("Unselect all" if all_selected else "Select all",
-             key="months_toggle", width="content",
-             on_click=_toggle_all_months)
+        st.session_state.setdefault("months_sel", list(range(1, 13)))
+        months = st.pills("Months", list(range(1, 13)), selection_mode="multi",
+                          key="months_sel",
+                          format_func=lambda m: MONTH_NAMES[m - 1])
+
+        all_selected = len(st.session_state.months_sel or []) == 12
+        st.button("Unselect all" if all_selected else "Select all",
+                 key="months_toggle", width="content",
+                 on_click=_toggle_all_months)
 
     if not months:
         months = list(range(1, 13))
@@ -442,6 +509,16 @@ metric = units.startswith("Metric")
 
 T = THEMES[st.session_state.theme]
 inject_css(T)
+
+# Sidebar year/month filters are meaningless on Region Matching (it loads
+# state_pentad.parquet on its own, not the sidebar-filtered df) but stay
+# mounted regardless of section — see the comment at sidebar_filters above
+# for why — so they're hidden the same way .st-key-topbar_controls is
+# positioned: CSS on the container's key, not a conditional around the
+# widgets.
+if section == "Region Matching":
+    st.markdown('<style>.st-key-sidebar_filters { display:none !important; }'
+               '</style>', unsafe_allow_html=True)
 
 # NOTE: there used to be a native-theme sync here (st.html script comparing
 # Streamlit's native theme against session_state.theme, syncing via
@@ -614,6 +691,119 @@ def nc_map(active, height=330):
     # the chart is rendered, via the plotly_chart config.
     fig.update_layout(height=height, margin=dict(l=0, r=0, t=0, b=0),
                       paper_bgcolor="rgba(0,0,0,0)")
+    return fig
+
+
+# ----------------------------------------------------- region matching ----
+
+# Every Region Matching block title, and every non-obvious control within
+# them, explains itself through an (i) rather than in-page prose — one
+# dict to edit, in the same spirit as THEMES and VARS.
+HINTS = {
+    "rm_reference_period":
+        "Years the historical statistics (means, bands, the interannual "
+        "diagnostic) are computed over. Any range works — everything is "
+        "recomputed from year-level rows — but the interannual coefficient "
+        "of variation stops meaning much below about 20 years.",
+    "rm_station_source_block":
+        "Which product supplies the station side of the comparison.",
+    "rm_station_source_control":
+        "MERRA-2 is the same reanalysis product used to characterise the "
+        "regions, which keeps any station-vs-region gap attributable to "
+        "climate rather than to comparing two different data sources. "
+        "ECONet is the station's own measurements, but only goes back to 2006.",
+    "rm_window_block":
+        "The part of the year being compared, in 10-day steps. This sets "
+        "both the region's window and, later, the length of the "
+        "station-side window that slides across the year in block 6.",
+    "rm_window_control":
+        "Example: Jun 1–Jul 30 is a 60-day summer window, pentads 31–42. "
+        "Allowed from about a month up to the full year.",
+    "rm_variables":
+        "Coming soon: the comparison variables for the radar (mean "
+        "temperature, diurnal range, interdiurnal variability, dew point, "
+        "precipitation, days THI ≥ 79).",
+    "rm_map_block":
+        "USDA-ARS regions covering the continental US, built by collapsing "
+        "the 2,863-cell grid to a state mean (see CLAUDE.md). Pick a region, "
+        "then optionally narrow it to specific states within it.",
+    "rm_map_states":
+        "Narrows the region to just these states. The band computed in a "
+        "later block is an area-weighted mean over whichever cells that "
+        "leaves — more states means a wider, more heterogeneous band, not "
+        "a different one.",
+    "rm_radar":
+        "Coming soon: the region's band against up to three station "
+        "windows, with an automatic best-match search.",
+    "rm_boxplots":
+        "Coming soon: one boxplot per comparison variable, region against "
+        "the selected stations, in native units.",
+}
+
+
+def block_hint(hint_key):
+    """A hoverable (i) for a block title or other label that can't take
+    Streamlit's own help= (st.expander has no such parameter) — a plain
+    HTML title attribute, which every browser already renders as a
+    tooltip with no JS of our own. Widgets that do take help= (slider,
+    radio, multiselect, ...) use that directly instead of this."""
+    st.markdown(
+        f'<span style="color:{T["muted"]}; cursor:help;" '
+        f'title="{html.escape(HINTS[hint_key])}">ⓘ</span>',
+        unsafe_allow_html=True)
+
+
+def pentad_of_doy(doy):
+    """Pentad index (1-73) for a day-of-year on a non-leap calendar — the
+    Window block's slider is always drawn against a fixed non-leap year
+    (2001), so unlike the R pipeline's pentad_of() this never needs the
+    leap-day case."""
+    return (doy - 1) // 5 + 1
+
+
+def region_map(state_regions, cells, active_region, active_states, height=460):
+    """CONUS states filled by USDA-ARS region, with every grid cell drawn
+    on top as a fixed backdrop and the current selection highlighted.
+    scope="usa": nc_map()'s Mercator choice is to avoid tilting North
+    Carolina at that latitude; at the full-country scale Albers (what
+    scope="usa" gives Plotly) is the projection that's actually correct.
+    """
+    region_colors = dict(zip(REGIONS, T["region_colors"]))
+
+    fig = go.Figure()
+
+    for reg in REGIONS:
+        sub = state_regions[state_regions["region"] == reg]
+        c = region_colors[reg]
+        fig.add_trace(go.Choropleth(
+            locations=[STATE_ABBR[s] for s in sub["state"]],
+            z=[1] * len(sub), locationmode="USA-states",
+            colorscale=[[0, c], [1, c]], showscale=False,
+            marker_line_color=T["bg"], marker_line_width=.5,
+            marker_opacity=1.0 if reg == active_region else .25,
+            text=sub["state"], hovertemplate="%{text}<extra></extra>",
+            name=reg, showlegend=False))
+
+    # every cell, muted, so the map reads the same regardless of selection
+    fig.add_trace(go.Scattergeo(
+        lon=cells["lon"], lat=cells["lat"], mode="markers",
+        marker=dict(size=3, color=T["muted"], opacity=.5),
+        hoverinfo="skip", showlegend=False))
+
+    # the current selection highlighted on top: selected states if any,
+    # else the whole active region
+    if active_states:
+        hi = cells[cells["state"].isin(active_states)]
+    else:
+        hi = cells[cells["region"] == active_region]
+    fig.add_trace(go.Scattergeo(
+        lon=hi["lon"], lat=hi["lat"], mode="markers",
+        marker=dict(size=4.5, color=T["accent"]),
+        hoverinfo="skip", showlegend=False))
+
+    fig.update_geos(scope="usa", bgcolor="rgba(0,0,0,0)")
+    fig.update_layout(height=height, margin=dict(l=0, r=0, t=0, b=0),
+                      paper_bgcolor="rgba(0,0,0,0)", showlegend=False)
     return fig
 
 
@@ -894,6 +1084,104 @@ elif section == "Anomalies":
         unsafe_allow_html=True)
 
 
+elif section == "Region Matching":
+    st.title("Region Matching")
+
+    # Independent of the sidebar-filtered `df` (and of `data`) entirely:
+    # this section answers a national question the six-station ECONet
+    # frame can't, over its own pre-aggregated input. See CLAUDE.md, "The
+    # Region matching section", for the full block-by-block design.
+    if not STATE_PENTAD_PATH.exists() or not CONUS_GRID_PATH.exists():
+        st.error("state_pentad.parquet and/or conus_grid.parquet not found "
+                 "next to this script. See CLAUDE.md's R preprocessing "
+                 "section for how they're built.")
+        st.stop()
+
+    state_pentad = load_state_pentad(STATE_PENTAD_PATH)
+    grid = load_conus_grid(CONUS_GRID_PATH)
+    state_regions = grid.drop_duplicates("state")[["state", "region"]]
+
+    with st.container(key="rm_block_reference"), \
+         st.expander("1. Reference period", expanded=True):
+        block_hint("rm_reference_period")
+        rm_ref_years = st.slider("Years", 1991, 2025, (1991, 2025),
+                                 key="rm_ref_years")
+        if rm_ref_years[1] - rm_ref_years[0] + 1 < 20:
+            st.warning("Under 20 years, the interannual variability "
+                      "diagnostic (block 6) stops meaning much.")
+
+    with st.container(key="rm_block_source"), \
+         st.expander("2. Station data source", expanded=True):
+        block_hint("rm_station_source_block")
+        rm_source = st.radio(
+            "Station data source", ["MERRA-2 (recommended)", "ECONet"],
+            key="rm_source", horizontal=True, label_visibility="collapsed",
+            help=HINTS["rm_station_source_control"])
+        if rm_source == "ECONet" and rm_ref_years[0] < 2006:
+            st.warning("ECONet station records only go back to 2006. Move "
+                      "the reference period's start year to 2006 or later, "
+                      "or switch back to MERRA-2.")
+
+    with st.container(key="rm_block_window"), \
+         st.expander("3. Window", expanded=True):
+        block_hint("rm_window_block")
+        rm_window = st.slider(
+            "Window", min_value=date(2001, 1, 1), max_value=date(2001, 12, 31),
+            value=(date(2001, 6, 1), date(2001, 7, 30)),
+            step=timedelta(days=10), format="MMM D",
+            key="rm_window", label_visibility="collapsed",
+            help=HINTS["rm_window_control"])
+        win_days = (rm_window[1] - rm_window[0]).days + 1
+        if win_days < 28:
+            st.warning("Window is under a month; about 30 days is the "
+                      "shortest supported.")
+        p_lo = pentad_of_doy(rm_window[0].timetuple().tm_yday)
+        p_hi = pentad_of_doy(rm_window[1].timetuple().tm_yday)
+        st.caption(f"{win_days} days · pentads {p_lo}–{p_hi}")
+
+    with st.container(key="rm_block_variables"), \
+         st.expander("4. Variables", expanded=False):
+        block_hint("rm_variables")
+        st.caption("Coming soon.")
+
+    with st.container(key="rm_block_map"), \
+         st.expander("5. Region and states", expanded=True):
+        block_hint("rm_map_block")
+
+        st.session_state.setdefault("rm_region", REGIONS[0])
+        rm_region = st.segmented_control("Region", REGIONS, key="rm_region")
+
+        region_states = sorted(
+            state_regions.loc[state_regions["region"] == rm_region, "state"])
+        st.multiselect("States", region_states, key=f"rm_states_{rm_region}",
+                       help=HINTS["rm_map_states"])
+        rm_states = st.session_state.get(f"rm_states_{rm_region}") or []
+
+        if rm_states:
+            n_cells = len(grid[grid["state"].isin(rm_states)])
+            sel_label = f"{len(rm_states)} state{'s' if len(rm_states) != 1 else ''} selected"
+        else:
+            n_cells = len(grid[grid["region"] == rm_region])
+            sel_label = f"{rm_region} — all {len(region_states)} states"
+        st.caption(f"{sel_label} · {n_cells:,} grid cells")
+
+        st.plotly_chart(region_map(state_regions, grid, rm_region, rm_states),
+                        width=W, config={"displayModeBar": False})
+
+    with st.container(key="rm_block_radar"), \
+         st.expander("6. Radar and station selection", expanded=False):
+        block_hint("rm_radar")
+        st.caption("Coming soon.")
+
+    with st.container(key="rm_block_boxplots"), \
+         st.expander("7. Boxplots", expanded=False):
+        block_hint("rm_boxplots")
+        st.caption("Coming soon.")
+
+
+# "Data" is hidden from NAV (Region Matching took its slot) but this branch
+# and everything in it is untouched and still reachable — put "Data" back
+# in NAV to restore it.
 elif section == "Data":
     st.title("Data")
 
