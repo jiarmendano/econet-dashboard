@@ -342,6 +342,42 @@ VARS = {
     "THI84":     dict(label="Days THImax \u2265 84 (Emergency)", agg="sum", kind="days"),
 }
 
+# Region Matching's own variable registry. Not folded into VARS: the two
+# describe different datasets entirely (VARS is the ECONet daily table;
+# this is state_pentad.parquet's already pentad-aggregated columns), and
+# state_pentad.parquet doesn't have most of what VARS lists at all. Same
+# shape and philosophy as VARS otherwise: one entry per variable, its
+# display label, and its kind for convert()/unit_label(). No "agg" key
+# here, unlike VARS: every grid variable is a plain mean across whichever
+# pentads/years get selected, because state_pentad.parquet was built
+# specifically so that would always be true (see CLAUDE.md, "Store
+# rates, not totals").
+#
+# PRECTOTCORR and THI_ge_79 are stored as rates (mean mm/day, fraction of
+# days), not totals, for exactly that reason: a pentad total/count would
+# carry pentad 12's extra leap day as a length artefact. Decision for the
+# app side: convert to a per-window total/count at display time, the
+# same "per period" convention VARS' own Precip_mm/THI75/THI79 already
+# use for the ECONet side, rather than labelling these as rates here.
+# kind below names that eventual display form, not the stored one; no
+# block does the conversion yet.
+#
+# DTR and interdiurnal_T2M are temperature *differences*, not absolute
+# readings, even though kind="temp" like T2M/T2MDEW: whichever later
+# block displays them must scale with convert_delta() (no +32 offset),
+# the same distinction Anomalies already draws for its own delta values
+# using VARS' kind.
+GRID_VARS = {
+    "T2M":              dict(label="Mean temperature",              kind="temp",   default=True),
+    "DTR":              dict(label="Diurnal temperature range",     kind="temp",   default=True),
+    "interdiurnal_T2M": dict(label="Day to day temperature change", kind="temp",   default=True),
+    "T2MDEW":           dict(label="Dew point",                     kind="temp",   default=True),
+    "PRECTOTCORR":      dict(label="Precipitation",                 kind="precip", default=True),
+    "THI_ge_79":        dict(label="Days THI ≥ 79",            kind="days",   default=True),
+    "THImax":           dict(label="Maximum THI",                   kind="index",  default=False),
+    "RHmed":            dict(label="Mean relative humidity",        kind="pct",    default=False),
+}
+
 # Columns from the source file that this app does not use
 DROP_COLS = ["THImax_rh", "THImin_rh", "THImed_rh"]
 
@@ -729,7 +765,8 @@ HINTS = {
         "Example: Jun 1 to Jul 30 is a 60-day summer window. Allowed from "
         "about a month up to the full year.",
     "rm_variables":
-        "Coming soon: the comparison variables for the radar.",
+        "Six variables make up the default comparison set. THImax and "
+        "RHmed are included but unchecked.",
     "rm_map_block":
         "Pick a region, then optionally narrow it to specific states "
         "within it.",
@@ -1163,8 +1200,21 @@ elif section == "Region Matching":
                       "shortest supported.")
 
     with st.container(key="rm_block_variables"), \
-         st.expander("4. Variables", expanded=False):
+         st.expander("4. Variables", expanded=True):
         st.caption(HINTS["rm_variables"])
+
+        # A multiselect, not a checkbox row: consistent with how every
+        # other section in this app (ts_stations, anom_stations,
+        # data_stations) already lets the user pick a subset from a
+        # named list, and 8 options read tighter as one dropdown than as
+        # 8 boxes at this column width.
+        default_vars = [v for v, m in GRID_VARS.items() if m["default"]]
+        rm_vars = st.multiselect(
+            "Variables", list(GRID_VARS), default=default_vars,
+            format_func=lambda v: GRID_VARS[v]["label"], key="rm_vars")
+        if len(rm_vars) < 3:
+            st.warning("Fewer than three variables selected. The "
+                      "comparison degenerates below that.")
 
     with st.container(key="rm_block_map"), \
          st.expander("5. Region and states", expanded=True):
