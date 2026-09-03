@@ -17,6 +17,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from scipy.stats import chi, norm
 
 # ---------------------------------------------------------------- config ----
 
@@ -786,6 +787,13 @@ HINTS = {
     "rm_radar":
         "Region average conditions against up to three stations, on a "
         "percentile radar. Automatic best-match search is coming soon.",
+    "rm_sigma":
+        "How many standard deviations apart the two climates are, across "
+        "all selected variables at once, correlation between them removed "
+        "(Mahony et al. 2017). Under 2σ is a representative analogue in "
+        "the literature; this is an absolute check, unlike the per-"
+        "variable table below, which only ranks the selected stations "
+        "against each other.",
     "rm_boxplots":
         "Coming soon: one boxplot per comparison variable, region against "
         "the selected stations.",
@@ -1070,6 +1078,177 @@ def coverage(region_py, station_pentad, station, p_lo, p_hi, y_lo, y_hi, variabl
         out[v] = float(np.mean((region_vals >= sta_p5) & (region_vals <= sta_p95)))
 
     return out
+
+
+def width_ratio(region_py, station_pentad, station, p_lo, p_hi, y_lo, y_hi, variables):
+    """Station band width / region band width, per variable -- both pooled
+    p95-p5 over the whole window, the same band coverage() and
+    climate_dissimilarity() use. Coverage alone cannot distinguish a
+    station that covers the region by sitting on top of it from one that
+    covers it by being much wider (a ratio well above 1); this makes that
+    visible without folding it into either score."""
+    sta_py = station_pentad_year(station_pentad, station, p_lo, p_hi, y_lo, y_hi)
+    out = {}
+    for v in variables:
+        r5, r95 = np.percentile(region_py[v], [5, 95])
+        s5, s95 = np.percentile(sta_py[v], [5, 95])
+        region_width = r95 - r5
+        out[v] = float((s95 - s5) / region_width) if region_width > 0 else np.nan
+    return out
+
+
+# Mahony et al. (2017) and Fitzpatrick & Dunn (2019) both retain principal
+# components of the reference-period interannual variability up to a 95%
+# cumulative-variance-explained cutoff before computing the Mahalanobis
+# distance, rather than inverting the full covariance matrix. Do not tune
+# this -- it is their published number, not a fitted one.
+PCA_VARIANCE_THRESHOLD = 0.95
+
+
+def sigma_dissimilarity(region_py, station_pentad, station, p_lo, p_hi, y_lo, y_hi,
+                        variables):
+    """Sigma dissimilarity (Mahony et al. 2017; applied to climate
+    analogues in Fitzpatrick & Dunn 2019 and to US specialty-crop
+    analogues in Parker et al. 2023, Sci Rep 13). Answers "is this a good
+    match at all", which climate_dissimilarity() cannot: that score is
+    unbounded and only ranks, whereas the chi-distribution conversion
+    below gives an absolute criterion (roughly under 2 sigma counts as a
+    representative analogue in the literature).
+
+    Works on window MEANS, not bands -- unlike climate_dissimilarity()/
+    coverage(), which compare p5-p95 bands. Per variable:
+
+      1. The station's own interannual variability: one window mean per
+         reference-period year at the station (averaging over the
+         window's pentads that year), then the standard deviation of
+         that series across years. This is the yardstick a raw
+         region-station gap gets scaled by -- a variable that swings a
+         lot year to year at the station counts for less per raw unit
+         than one that barely moves there.
+      2. The region-minus-station departure of the pooled window means,
+         divided by that station SD: how many station-interannual-sigmas
+         apart the two climates are, per variable.
+      3. PCA on the station's own year-to-year anomalies (already
+         SD-scaled there, so this is a PCA of the correlation structure)
+         across the selected variables, keeping only the leading
+         components that cumulatively explain PCA_VARIANCE_THRESHOLD of
+         the variance. This is what stops two strongly correlated axes
+         (T2M and T2MDEW, typically) from counting as two independent
+         lines of evidence, and -- unlike pseudo-inverting the full
+         covariance -- it also drops whatever the trailing, smallest-
+         eigenvalue components are: with as few reference years as this
+         app allows, those are usually sampling noise in the station's
+         own history rather than a real, estimable direction of
+         variability, and inverting them (a small denominator) turns
+         that noise into a hugely magnified distance. Diagnosed on a
+         concrete case, logged in CLAUDE.md: PLYM, a station cell that is
+         itself part of the North Carolina state average, scored 2.97
+         sigma against NC under the un-truncated version even though no
+         single variable was even 1 sigma off, because one near-
+         degenerate direction (200x smaller variance than the largest,
+         loading mostly on DTR vs. T2MDEW) supplied 78% of the squared
+         distance by itself.
+      4. Mahalanobis distance of the scaled departure vector, computed in
+         that reduced PC space: the departure projected onto each
+         retained component, divided by that component's own variance
+         (its eigenvalue), summed and square-rooted -- the ordinary
+         whitened-distance formula, but only over the kept axes, so nothing
+         gets divided by a near-zero, poorly estimated eigenvalue.
+      5. That distance is converted to an absolute "sigma dissimilarity"
+         via the chi distribution with degrees of freedom equal to the
+         number of *retained components*, not the number of variables:
+         the chi survival function at the Mahalanobis distance is the
+         upper-tail probability a multivariate-normal reference climate
+         would fall this far out or farther, and norm.isf() of half that
+         probability, read as a two-tailed normal interval, turns it back
+         into an ordinary sigma count -- so a one-variable (or one-
+         component) comparison reduces to that variable's own raw
+         z-score exactly (chi's df=1 case is the distribution of |Z|).
+         Survival function both ways (chi.sf, norm.isf), not 1-cdf/ppf: a
+         poor match's tail probability is routinely far smaller than
+         float64's ~1e-16 resolution near 1, which would make the cdf
+         saturate at exactly 1.0 and cap every bad match at the same ~8
+         sigma -- quietly reproducing the old dissimilarity score's
+         saturation defect (CLAUDE.md) that this metric exists to avoid.
+
+    A variable whose station interannual SD is ~0 over the reference
+    period (e.g. THI_ge_79 in a winter window, at a station with zero
+    heat-stress days in every year) cannot be scaled and is dropped from
+    the comparison -- both from the vector and before the PCA step -- the
+    same "no meaningful variation" reasoning CLAUDE.md already applies to
+    the radar's axes. coverage() is untouched by this: it answers a
+    different question and still drives the radar's alert segments.
+    Returns sigma, the Mahalanobis distance and the retained-component df
+    behind it, how many components were kept and the variance fraction
+    they actually reached (>= PCA_VARIANCE_THRESHOLD, the loop stops as
+    soon as it clears the cutoff), which variables were usable/dropped,
+    and each variable's raw (unconverted, unscaled) departure and
+    station-SD-scaled departure, for the results table."""
+    sta_win = station_pentad_year(station_pentad, station, p_lo, p_hi, y_lo, y_hi)
+    variables = list(variables)
+
+    station_year = sta_win.groupby("year")[variables].mean()
+    station_mean = station_year.mean()
+    station_std = station_year.std(ddof=1)
+
+    region_mean = pd.Series(
+        {v: float(np.mean(region_py[v])) for v in variables})
+
+    usable = [v for v in variables if station_std.get(v, 0.0) > 1e-9]
+    dropped = [v for v in variables if v not in usable]
+
+    per_variable = {
+        v: dict(departure=float(region_mean[v] - station_mean[v]), z=np.nan)
+        for v in variables
+    }
+
+    if not usable:
+        return dict(sigma=np.nan, distance=np.nan, df=0, n_components=0,
+                    variance_explained=np.nan, usable=usable, dropped=dropped,
+                    per_variable=per_variable)
+
+    z = (region_mean[usable] - station_mean[usable]) / station_std[usable]
+    for v in usable:
+        per_variable[v]["z"] = float(z[v])
+
+    z_year = (station_year[usable] - station_mean[usable]) / station_std[usable]
+    cov = z_year.cov().to_numpy()
+
+    # eigh returns ascending order; PCA wants the leading (largest-variance)
+    # components first.
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    order = np.argsort(eigvals)[::-1]
+    eigvals, eigvecs = eigvals[order], eigvecs[:, order]
+
+    total_var = eigvals.sum()
+    cumvar = np.cumsum(eigvals) / total_var
+    n_components = int(np.searchsorted(cumvar, PCA_VARIANCE_THRESHOLD, side="left")) + 1
+    n_components = min(n_components, len(eigvals))
+    variance_explained = float(cumvar[n_components - 1])
+
+    kept_vals = eigvals[:n_components]
+    kept_vecs = eigvecs[:, :n_components]
+
+    z_vec = z.to_numpy()
+    scores = kept_vecs.T @ z_vec               # departure, projected onto each PC
+    d2 = float(np.sum(scores ** 2 / kept_vals))
+    distance = float(np.sqrt(max(d2, 0.0)))
+
+    df = n_components
+    # Survival function, not 1 - cdf: a poor match's upper-tail probability
+    # is often far smaller than float64's ~1e-16 resolution near 1, which
+    # would make cdf saturate to exactly 1.0 and cap every bad match at the
+    # same ~8 sigma -- silently reproducing the old score's saturation
+    # defect this metric was chosen to avoid. sf (and isf on the way back)
+    # keep the tail probability itself small instead of computing it by
+    # subtracting two numbers close to 1, which is what stays accurate out
+    # past 30+ sigma.
+    tail_p = float(chi.sf(distance, df))
+    sigma = float(norm.isf(tail_p / 2))
+
+    return dict(sigma=sigma, distance=distance, df=df, n_components=n_components,
+               variance_explained=variance_explained,
+               usable=usable, dropped=dropped, per_variable=per_variable)
 
 
 def _avg_conus_percentile(value, variable, conus_scale, p_lo, p_hi):
@@ -1694,23 +1873,58 @@ elif section == "Region Matching":
                                      p_lo, p_hi, y_lo, y_hi, ordered_vars)
                         for stn in focus_stations
                     }
-                    dis_by_stn = {
-                        stn: climate_dissimilarity(region_py, station_pentad, stn, scale,
-                                                  p_lo, p_hi, y_lo, y_hi, ordered_vars)
+                    sigma_by_stn = {
+                        stn: sigma_dissimilarity(region_py, station_pentad, stn,
+                                                p_lo, p_hi, y_lo, y_hi, ordered_vars)
                         for stn in focus_stations
                     }
+                    width_by_stn = {
+                        stn: width_ratio(region_py, station_pentad, stn,
+                                        p_lo, p_hi, y_lo, y_hi, ordered_vars)
+                        for stn in focus_stations
+                    }
+
+                    sig_cols = st.columns(len(focus_stations))
+                    for col, stn in zip(sig_cols, focus_stations):
+                        sig = sigma_by_stn[stn]["sigma"]
+                        if np.isnan(sig):
+                            col.metric(f"{stn} sigma dissimilarity", "n/a",
+                                      help=HINTS["rm_sigma"])
+                        else:
+                            col.metric(f"{stn} sigma dissimilarity", f"{sig:.2f}σ",
+                                      help=HINTS["rm_sigma"])
+                            if sig < 2:
+                                col.caption("Under 2σ — a representative analogue.")
+
+                    dropped_msg = "; ".join(
+                        f"{stn}: " + ", ".join(GRID_VARS[v]["label"]
+                                              for v in sigma_by_stn[stn]["dropped"])
+                        for stn in focus_stations if sigma_by_stn[stn]["dropped"])
+                    if dropped_msg:
+                        st.caption("Dropped from sigma dissimilarity — no "
+                                  f"interannual variation at the station: {dropped_msg}")
+
                     rows = []
                     for v in ordered_vars:
-                        rec = {"Variable": GRID_VARS[v]["label"]}
+                        kind = GRID_VARS[v]["kind"]
+                        rate_scale = win_days if v in RATE_VARS else 1
+                        rec = {"Variable": f"{GRID_VARS[v]['label']}{unit_suffix(kind, metric)}"}
                         for stn in focus_stations:
                             rec[f"{stn} coverage"] = round(cov_by_stn[stn][v], 2)
-                            rec[f"{stn} contribution"] = round(
-                                dis_by_stn[stn][v]["dissimilarity"], 1)
+                            dep_raw = (sigma_by_stn[stn]["per_variable"][v]["departure"]
+                                      * rate_scale)
+                            rec[f"{stn} departure"] = round(
+                                convert_delta(dep_raw, kind, metric), 2)
+                            wr = width_by_stn[stn][v]
+                            rec[f"{stn} width ratio"] = round(wr, 2) if not np.isnan(wr) else None
                         rows.append(rec)
                     st.dataframe(pd.DataFrame(rows), width=W, hide_index=True)
                     st.caption("Coverage: share of region average conditions inside "
-                              "the station's band (MESS). Contribution: that "
-                              "variable's share of climate_dissimilarity's total.")
+                              "the station's band (MESS). Departure: region average "
+                              "conditions minus station, signed, native units. Width "
+                              "ratio: station band width ÷ region band width — "
+                              "above 1 means the station covers partly by being wider "
+                              "than the region, not by sitting on it.")
 
     with st.container(key="rm_block_boxplots"), \
          st.expander("7. Boxplots", expanded=False):
