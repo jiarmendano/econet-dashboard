@@ -953,12 +953,22 @@ def region_profile(state_pentad, state_weights, states, p_lo, p_hi, y_lo, y_hi,
 def station_pentad_year(station_pentad, station, p_lo, p_hi, y_lo, y_hi):
     """A station is already a single cell's pentad x year series in
     station_pentad.parquet -- no collapsing step, unlike
-    region_pentad_year(), just the same window/reference-period filter."""
-    return station_pentad[
-        (station_pentad["station"] == station)
-        & station_pentad["pentad"].between(p_lo, p_hi)
-        & station_pentad["year"].between(y_lo, y_hi)
-    ]
+    region_pentad_year(), just the same window/reference-period filter.
+
+    p_lo > p_hi means the window wraps past pentad 73 back to 1 -- the
+    year is circular on this grid, so a station window can run through
+    December into January. Every existing caller only ever passes
+    p_lo <= p_hi (the Window block's slider can't produce a wrap), so
+    this is purely additive: it exists for the automatic search
+    (Task 14), which walks a station window all the way around the
+    year and has to express a wrapped one somehow."""
+    same_station = station_pentad["station"] == station
+    same_year = station_pentad["year"].between(y_lo, y_hi)
+    if p_lo <= p_hi:
+        in_window = station_pentad["pentad"].between(p_lo, p_hi)
+    else:
+        in_window = (station_pentad["pentad"] >= p_lo) | (station_pentad["pentad"] <= p_hi)
+    return station_pentad[same_station & in_window & same_year]
 
 
 def station_profile(station_pentad, station, p_lo, p_hi, y_lo, y_hi,
@@ -1249,6 +1259,225 @@ def sigma_dissimilarity(region_py, station_pentad, station, p_lo, p_hi, y_lo, y_
     return dict(sigma=sigma, distance=distance, df=df, n_components=n_components,
                variance_explained=variance_explained,
                usable=usable, dropped=dropped, per_variable=per_variable)
+
+
+# Task 14, automatic search: the year is circular on the pentad grid --
+# pentad 73 (Dec 27-31) is adjacent to pentad 1 (Jan 1-5) -- so a station
+# window can run through December into January. 73, not 72 or 75: every
+# pentad is exactly 5 days (73*5 = 365, the Window block's fixed non-leap
+# reference calendar), matching pentad_of_doy() exactly.
+N_PENTADS_PER_YEAR = 73
+
+# CLAUDE.md, "The window search steps by 10 days": pentads 1, 3, ..., 71 --
+# 36 start positions on the pentad grid, each 2 pentads (10 days) apart.
+SEARCH_STARTS = list(range(1, N_PENTADS_PER_YEAR, 2))
+
+
+def _wrapped_window(p_start, win_pentads, n_pentads=N_PENTADS_PER_YEAR):
+    """(p_lo, p_hi) for a win_pentads-long window starting at p_start,
+    wrapping past n_pentads back to 1. Passed straight to
+    station_pentad_year(), which already treats p_lo > p_hi as a wrap --
+    this only has to compute the wrapped end pentad. A win_pentads ==
+    n_pentads window (the full year) yields p_lo == p_hi only when
+    p_start == 1; every other start still covers the whole year, just
+    wrapped, which is a real (if redundant) window, not a bug."""
+    p_end = p_start + win_pentads - 1
+    p_hi = ((p_end - 1) % n_pentads) + 1
+    return p_start, p_hi
+
+
+def _window_pentad_order(p_start, win_pentads, n_pentads=N_PENTADS_PER_YEAR):
+    """The exact ordered pentad sequence of a win_pentads-long window
+    starting at p_start, wrapping past n_pentads back to 1. Needed to line
+    a candidate station window up against the region's fixed window by
+    POSITION (day 1 of the window, day 2, ...), not by absolute pentad-of-
+    year number: the two windows generally sit in different parts of the
+    year, since translating the station window through the whole year is
+    the entire point of the search."""
+    return [(p_start - 1 + i) % n_pentads + 1 for i in range(win_pentads)]
+
+
+def _pentad_start_date(p, ref_year=2001):
+    return date(ref_year, 1, 1) + timedelta(days=(p - 1) * 5)
+
+
+def _pentad_end_date(p, ref_year=2001):
+    return date(ref_year, 1, 1) + timedelta(days=p * 5 - 1)
+
+
+def window_date_range(p_start, win_pentads, ref_year=2001):
+    """Human-readable (start_date, end_date, wrapped) for a win_pentads-
+    long window starting at pentad p_start, on the Window block's fixed
+    non-leap reference calendar. wrapped is True when the window runs
+    past pentad 73 (Dec 27-31) back into January -- end_date's month/day
+    are still meaningful, but its year is ref_year + 1."""
+    start = _pentad_start_date(p_start, ref_year)
+    p_end_raw = p_start + win_pentads - 1
+    if p_end_raw <= N_PENTADS_PER_YEAR:
+        return start, _pentad_end_date(p_end_raw, ref_year), False
+    return start, _pentad_end_date(p_end_raw - N_PENTADS_PER_YEAR, ref_year + 1), True
+
+
+def _trajectory_correlation(region_pentad_mean, station_pentad_mean, usable,
+                            station_mean, station_std):
+    """Pearson correlation of the region's and the station's mean
+    seasonal trajectory across the window, position by position (index
+    0..win_pentads-1 in each side's own window order) rather than by
+    calendar pentad, since the two windows generally sit in different
+    parts of the year. CLAUDE.md, "Trend is a filter, not a weight":
+    same mean with opposite seasonal trend is the case a level-only
+    score gets wrong, so a negative correlation here excludes the
+    candidate from the search entirely (see the caller), regardless of
+    how good its sigma dissimilarity is.
+
+    Both `region_pentad_mean` and `station_pentad_mean` are one row per
+    window position already (mean across reference-period years),
+    reindexed by the caller into that shared position order, columns ==
+    the full requested variable list. Each of `usable` (sigma_dissim-
+    ilarity()'s usable list for this candidate -- variables the station
+    has nonzero interannual SD on) is z-scored by the station's own
+    overall-window mean/SD -- the same scale sigma_dissimilarity() puts
+    every variable on -- and the z-scored columns are averaged into one
+    composite trajectory per side, so variables with very different
+    native units (mm vs degC vs a day count) contribute comparably
+    rather than one dominating by magnitude alone; this is a design
+    choice for combining variables into a single trajectory, not a
+    quantity either cited paper defines. Returns nan (never excluded --
+    a correlation against nothing to compare is not evidence of a
+    mismatch) if there are fewer than 2 window positions, no usable
+    variable, or either side's composite trajectory is flat."""
+    if not usable or region_pentad_mean.shape[0] < 2:
+        return np.nan
+    reg_z = (region_pentad_mean[usable] - station_mean[usable]) / station_std[usable]
+    sta_z = (station_pentad_mean[usable] - station_mean[usable]) / station_std[usable]
+    reg_traj = reg_z.mean(axis=1).to_numpy()
+    sta_traj = sta_z.mean(axis=1).to_numpy()
+    if np.isnan(reg_traj).any() or np.isnan(sta_traj).any():
+        return np.nan
+    if np.std(reg_traj) < 1e-12 or np.std(sta_traj) < 1e-12:
+        return np.nan
+    return float(np.corrcoef(reg_traj, sta_traj)[0, 1])
+
+
+def search_best_matches(region_py, station_pentad, p_lo, p_hi, y_lo, y_hi,
+                        variables, stations=None, top_k=3, near_min_frac=0.05):
+    """Automatic best-match search (Task 14). The region's window
+    (`p_lo`-`p_hi`, `region_py` its precomputed area-weighted series) is
+    fixed; for each candidate station and each of SEARCH_STARTS' 36
+    station-window start positions, a station window of the SAME length
+    (p_hi - p_lo + 1 pentads) is built, wrapping past pentad 73 back into
+    January where needed, and scored with sigma_dissimilarity() against
+    the region -- `len(stations) * 36` candidates in total (216 for the
+    default six stations).
+
+    Candidates whose pentad-trajectory correlation with the region is
+    negative (_trajectory_correlation()) are excluded before ranking, per
+    CLAUDE.md's "Trend is a filter, not a weight" -- same mean, opposite
+    seasonal trend, is the case sigma dissimilarity's level-only
+    comparison cannot see for itself.
+
+    The top `top_k` are chosen greedily by ascending sigma, but with a
+    diversity rule: after a candidate is chosen, every remaining
+    candidate from the SAME STATION whose window shares more than half
+    its length (by pentad overlap, wrap-aware) with the chosen one is
+    dropped before the next pick -- consecutive search positions share
+    most of their days and so carry mostly the same information, which is
+    a reason to exclude within a station; between different stations an
+    overlapping window means nothing, since they are different data
+    entirely, so a second station is never dropped just for winning at a
+    similar time of year. Without the same-station half applied, the
+    result is one station three times over near-identical windows, not
+    three findings; the same station can still legitimately appear more
+    than once in the top 3 when its good windows are genuinely disjoint
+    (e.g. a station matching in both May-Aug and Oct-Feb) -- that is two
+    real findings, not a duplicate, and a better match matters more than
+    variety of station.
+
+    For each finalist, also reports the range of window start pentads,
+    for that SAME station, whose sigma is within `near_min_frac` (5%) of
+    the finalist's own sigma -- CLAUDE.md: consecutive windows share 50
+    of 60 days, so the minimum is a broad valley, not resolved finer than
+    the 10-day step; a single date overstates the precision.
+
+    Returns a dict: `n_candidates` (len(stations) * 36), `n_excluded`
+    (negative-correlation), and `top` -- a list of up to `top_k` dicts,
+    each: station, start (pentad), p_lo/p_hi (wrap-aware, p_lo > p_hi
+    means wrapped), start_date/end_date/wrapped (window_date_range()),
+    sigma, distance, df, n_components, correlation, under_2sigma (bool),
+    and near_min_starts (sorted list of qualifying start pentads for that
+    station)."""
+    if stations is None:
+        stations = sorted(station_pentad["station"].unique())
+    variables = list(variables)
+    win_pentads = p_hi - p_lo + 1
+
+    region_pentad_order = list(range(p_lo, p_hi + 1))
+    region_pentad_mean = (region_py.groupby("pentad")[variables].mean()
+                          .reindex(region_pentad_order))
+
+    candidates = []
+    for station in stations:
+        for s in SEARCH_STARTS:
+            c_lo, c_hi = _wrapped_window(s, win_pentads)
+            res = sigma_dissimilarity(region_py, station_pentad, station,
+                                      c_lo, c_hi, y_lo, y_hi, variables)
+
+            sta_win = station_pentad_year(station_pentad, station, c_lo, c_hi, y_lo, y_hi)
+            station_year = sta_win.groupby("year")[variables].mean()
+            station_mean, station_std = station_year.mean(), station_year.std(ddof=1)
+            window_pentads = _window_pentad_order(s, win_pentads)
+            station_pentad_mean = (sta_win.groupby("pentad")[variables].mean()
+                                   .reindex(window_pentads))
+            corr = _trajectory_correlation(region_pentad_mean, station_pentad_mean,
+                                           res["usable"], station_mean, station_std)
+
+            candidates.append(dict(
+                station=station, start=s, p_lo=c_lo, p_hi=c_hi,
+                pentads=set(window_pentads), sigma=res["sigma"],
+                distance=res["distance"], df=res["df"],
+                n_components=res["n_components"], correlation=corr))
+
+    n_candidates = len(candidates)
+    # NaN correlation (fewer than 2 positions, no usable variable, or a
+    # flat trajectory on either side) is not evidence of a mismatch and
+    # is kept -- `nan < 0` is already False in Python, so this excludes
+    # only real negative correlations.
+    valid = [c for c in candidates if not (c["correlation"] < 0)]
+    n_excluded = n_candidates - len(valid)
+
+    def sigma_key(c):
+        return c["sigma"] if not np.isnan(c["sigma"]) else float("inf")
+
+    remaining = sorted(valid, key=sigma_key)
+    overlap_threshold = win_pentads / 2
+    top = []
+    while remaining and len(top) < top_k:
+        best = remaining.pop(0)
+        top.append(best)
+        # Same-station only: an overlapping window from a DIFFERENT
+        # station carries no redundant information (different data
+        # entirely) and is never dropped just for sitting near a winner.
+        remaining = [c for c in remaining
+                    if c["station"] != best["station"]
+                    or len(c["pentads"] & best["pentads"]) <= overlap_threshold]
+
+    results = []
+    for best in top:
+        by_station = [c for c in valid if c["station"] == best["station"]]
+        near_min = [c["start"] for c in by_station
+                   if not np.isnan(c["sigma"])
+                   and c["sigma"] <= best["sigma"] * (1 + near_min_frac)]
+        start_date, end_date, wrapped = window_date_range(best["start"], win_pentads)
+        results.append(dict(
+            station=best["station"], start=best["start"],
+            p_lo=best["p_lo"], p_hi=best["p_hi"],
+            start_date=start_date, end_date=end_date, wrapped=wrapped,
+            sigma=best["sigma"], distance=best["distance"], df=best["df"],
+            n_components=best["n_components"], correlation=best["correlation"],
+            under_2sigma=bool(best["sigma"] < 2),
+            near_min_starts=sorted(near_min)))
+
+    return dict(n_candidates=n_candidates, n_excluded=n_excluded, top=results)
 
 
 def _avg_conus_percentile(value, variable, conus_scale, p_lo, p_hi):
