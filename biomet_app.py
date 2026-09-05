@@ -281,6 +281,22 @@ def inject_css(t):
           > div[data-testid="stExpander"] > details > summary p {{
           font-size:1.125rem; font-weight:600; letter-spacing:-.01em; }}
 
+      /* The station-window slider's own filled track: forced to the
+         same flat, neutral colour as the base track, with no colour or
+         gradient distinguishing a "filled" portion from the rest,
+         regardless of which descendant div BaseWeb actually uses for it
+         or how deep it sits. Best effort, unverified in a browser this
+         session. */
+      .st-key-rm_station_window_slider div[data-baseweb="slider"] div:not([role="slider"]) {{
+          background:{t['line']} !important;
+          background-color:{t['line']} !important;
+          background-image:none !important; }}
+
+      /* The "Selected window" box: KPI-card styling, close to the month
+         bar above it and with breathing room before the radar below. */
+      .st-key-rm_selected_window {{
+          margin-top:6px; margin-bottom:20px; }}
+
       /* Units and Theme, pinned top-left just outside the sidebar (300px
          is Streamlit's default sidebar width; if the sidebar is dragged
          to a different width, or collapsed, this stops lining up with its
@@ -804,10 +820,12 @@ HINTS = {
         "period, window length and variables, and fills the station and "
         "window controls below with its answer.",
     "rm_station_window":
-        "Same length as the region's window -- this only moves where in "
-        "the year it sits. Default matches the region's own window "
-        "exactly. Manual mode only: automatic selection gives each "
-        "station its own window instead.",
+        "The handle marks where the window starts; its length always "
+        "matches the region's window. Sliding past December wraps into "
+        "January -- see the shaded block on the month bar below for "
+        "where it actually sits. Default matches the region's own "
+        "window exactly. Manual mode only: automatic selection gives "
+        "each station its own window instead.",
     "rm_sigma":
         "How many standard deviations apart the two climates are, across "
         "all selected variables at once, correlation between them removed "
@@ -830,21 +848,70 @@ def _set_rm_window_annual():
         st.session_state.rm_window = (date(2001, 1, 1), date(2001, 12, 31))
 
 
-def month_scale():
-    """A |--Jan--|--Feb--|--Mar--| ruler under the window slider so the
-    selected range's position in the year is readable at a glance. Column
-    widths are proportional to each month's day count on the same 2001,
-    non-leap calendar the slider itself uses, so the tick marks line up
-    with where its handles can actually land."""
+def month_scale(highlight=None, extra_days=0):
+    """A |--Jan--|--Feb--|--Mar--| ruler so a selected date range's
+    position in the year is readable at a glance. Column widths are
+    proportional to each month's day count on the same 2001, non-leap
+    calendar every window control in this section uses, so the tick
+    marks line up with where those controls' handles can actually land.
+
+    `extra_days` (Task 18): repeats Jan, Feb, ... after Dec for that many
+    more days, extending the ruler itself past the year boundary -- for
+    the station-window control (Task 20: a single-value start position
+    plus back/forward step buttons, this bar being the PRIMARY visual --
+    the control itself only sets where the block sits), whose window can
+    wrap past day 365 into January, so the ruler needs to be exactly as
+    long as that possibility for the block to visibly slide THROUGH the
+    boundary rather than stopping dead at Dec 31 with nowhere further to
+    show.
+
+    `highlight`, if given, is (start_date, end_date, wrapped) -- e.g.
+    window_date_range()'s own return, `wrapped` end dates already living
+    in year 2002 -- drawn as a single shaded band positioned by
+    day-of-the-full-ruler fraction (not snapped to whole month columns,
+    so it reads at the actual step the window controls move at), able to
+    extend past the 12-month mark into the repeated months precisely
+    because the ruler itself now does too when `extra_days` > 0 -- no
+    special-casing wrapped into two separate segments any more, unlike
+    the pre-Task-18 version, since the ruler no longer dead-ends at
+    day 365."""
     days_in_month = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    cols = " ".join(f"{d}fr" for d in days_in_month)
+    months = list(zip(MONTH_NAMES, days_in_month))
+    extended, remaining, i = list(months), extra_days, 0
+    while remaining > 0:
+        name, days = months[i % 12]
+        take = min(days, remaining)
+        extended.append((name, take))
+        remaining -= take
+        i += 1
+    total_days = sum(d for _, d in extended)
+
+    cols = " ".join(f"{d}fr" for _, d in extended)
     cells = "".join(
         f'<div style="border-left:1px solid {T["line"]}; text-align:center; '
         f'color:{T["muted"]}; font-size:.72rem; padding:2px 0;">{m}</div>'
-        for m in MONTH_NAMES)
+        for m, _ in extended)
+
+    band_html = ""
+    if highlight is not None:
+        start, end, wrapped = highlight
+
+        def day_of_ruler(d):
+            base = 0 if d.year == 2001 else 365
+            return base + (d - date(d.year, 1, 1)).days
+
+        left = day_of_ruler(start) / total_days * 100
+        width = (day_of_ruler(end) - day_of_ruler(start) + 1) / total_days * 100
+        band_html = (
+            f'<div style="position:absolute; left:{left:.3f}%; width:{width:.3f}%; '
+            f'top:0; bottom:0; background:{T["accent"]}; opacity:.30; '
+            f'border-radius:2px;"></div>')
+
     st.markdown(
+        f'<div style="position:relative;">'
         f'<div style="display:grid; grid-template-columns:{cols}; '
-        f'border-right:1px solid {T["line"]};">{cells}</div>',
+        f'border-right:1px solid {T["line"]};">{cells}</div>'
+        f'{band_html}</div>',
         unsafe_allow_html=True)
 
 
@@ -2347,9 +2414,53 @@ elif section == "Region Matching":
             scale = conus_percentile_scale(y_lo, y_hi)
 
             st.session_state.setdefault("rm_radar_stations", [all_stations[0]])
-            st.session_state.setdefault("rm_station_window_start", p_lo)
             st.session_state.setdefault("rm_auto_select", False)
             st.session_state.setdefault("rm_display_mode", "Distribution")
+
+            # The station window's default must keep tracking the region's
+            # own window (position AND length -- either can change above)
+            # whenever it moves, not just on first ever visit: a plain
+            # setdefault() only fires once per session and never re-syncs,
+            # which is what "only slides from January 1" turned out to be
+            # -- whatever position the region window happened to be at the
+            # FIRST time this control was ever drawn (pentad 1, if that
+            # first visit was in Annual mode) stuck permanently, however
+            # often the window above changed afterwards.
+            gap_days = win_pentads * 5
+            # SEARCH_STARTS is odd pentads only (1, 3, ..., 71); p_lo lands
+            # there automatically whenever the region window was reached by
+            # actually dragging its own slider (a 10-real-day step from
+            # Jan 1 always produces an odd pentad), but is not guaranteed
+            # to for an arbitrary p_lo in general -- and select_slider()
+            # silently resets to its FIRST option if ever handed a default
+            # outside its declared `options`, rather than erroring, so an
+            # even p_lo would otherwise snap the station window's default
+            # to Jan 1 without any visible sign why. Floor to the nearest
+            # odd pentad rather than assume.
+            snapped_p_lo = p_lo if p_lo % 2 == 1 else p_lo - 1
+            region_sig = (snapped_p_lo, gap_days)
+            if st.session_state.get("_rm_station_window_region_sig") != region_sig:
+                st.session_state.rm_station_window_start = snapped_p_lo
+                st.session_state["_rm_station_window_region_sig"] = region_sig
+            elif "rm_station_window_start" not in st.session_state:
+                # Region unchanged, but Streamlit prunes a widget's own
+                # session_state once it stops being rendered for a run --
+                # automatic mode hides this control entirely, so a full
+                # auto-on/auto-off cycle silently drops it and a bare
+                # select_slider() with no existing value to read would
+                # otherwise reset quietly to its first option (pentad 1)
+                # instead of where the user actually left it. Restore from
+                # a shadow key that isn't itself a widget's key and so is
+                # never pruned.
+                st.session_state.rm_station_window_start = st.session_state.get(
+                    "_rm_station_window_backup", p_lo)
+
+            # Mirror the live value into that same shadow key whenever it
+            # exists, so the NEXT hide/show cycle restores the actual last
+            # position rather than a stale pre-hide one.
+            if "rm_station_window_start" in st.session_state:
+                st.session_state["_rm_station_window_backup"] = \
+                    st.session_state.rm_station_window_start
 
             auto = st.session_state.rm_auto_select
             cap = 3 if st.session_state.rm_display_mode == "Distribution" else None
@@ -2399,14 +2510,50 @@ elif section == "Region Matching":
                     st.caption("Each station uses its own automatically "
                               "found window — see the table below.")
                 else:
-                    def _fmt_station_window(s, _win=win_pentads):
-                        sd, ed, wrapped = window_date_range(s, _win)
-                        return f"{sd:%b %d}–{ed:%b %d}{' (+1y)' if wrapped else ''}"
+                    # The label is what explains the control; a plain
+                    # slider (no extra columns squeezing it narrower than
+                    # the month bar below) keeps the two the same width,
+                    # which is what lets the handle sit over the month it
+                    # actually selects. The fill-neutralising CSS lives in
+                    # inject_css(), not an inline st.markdown() call here.
+                    def _fmt_station_start(s):
+                        return f"{_pentad_start_date(s):%b %d}"
 
-                    st.select_slider("Station window", options=SEARCH_STARTS,
-                                    format_func=_fmt_station_window,
-                                    key="rm_station_window_start",
-                                    help=HINTS["rm_station_window"])
+                    with st.container(key="rm_station_window_slider"):
+                        st.select_slider(
+                            f"Select the start of the {win_days} day window",
+                            options=SEARCH_STARTS, format_func=_fmt_station_start,
+                            key="rm_station_window_start",
+                            help=HINTS["rm_station_window"])
+
+                    _sd, _ed, _wrapped = window_date_range(
+                        st.session_state.rm_station_window_start, win_pentads)
+                    # The ruler is extended by the window's own length, so
+                    # a wrapped block still shows as one continuous strip
+                    # (repeated Jan, Feb, ... after Dec) rather than
+                    # stopping dead at Dec 31. This is still the PRIMARY
+                    # visual for the window; the slider above only sets
+                    # where it starts.
+                    month_scale(highlight=(_sd, _ed, _wrapped), extra_days=gap_days)
+
+                    # KPI-card styling (panel background, bordered box),
+                    # sentence case rather than the KPI label's small-caps
+                    # uppercase, slightly larger type than a plain caption,
+                    # tight against the ruler above and with room before
+                    # the radar below (both via the .st-key-rm_selected_window
+                    # rule in inject_css()) -- this is plain st.markdown
+                    # HTML, not BaseWeb's own internal markup, so unlike
+                    # the slider CSS there is nothing here to be
+                    # unverifiable about.
+                    _wrap_note = " (+1y)" if _wrapped else ""
+                    with st.container(key="rm_selected_window"):
+                        st.markdown(
+                            f'<div style="background:{T["panel"]}; '
+                            f'border:1px solid {T["line"]}; border-radius:8px; '
+                            f'padding:12px 14px; color:{T["muted"]}; font-size:.85rem;">'
+                            f'Selected window: {_sd.strftime("%b")} {_sd.day} to '
+                            f'{_ed.strftime("%b")} {_ed.day}{_wrap_note}</div>',
+                            unsafe_allow_html=True)
 
             radar_stations = st.session_state.rm_radar_stations or []
 
@@ -2467,13 +2614,10 @@ elif section == "Region Matching":
                     st.caption(f"{region_caption} Each station above at its own "
                               "automatically found window.")
                 else:
-                    s_lo, s_hi = station_windows[radar_stations[0]]
-                    s_start_date, s_end_date, s_wrapped = window_date_range(
-                        s_lo, win_pentads)
                     st.caption(
                         f"{region_caption} Station window: "
-                        f"{s_start_date:%b %d}–{s_end_date:%b %d}"
-                        f"{' (wraps into next year)' if s_wrapped else ''}.")
+                        f"{_sd:%b %d}–{_ed:%b %d}"
+                        f"{' (wraps into next year)' if _wrapped else ''}.")
 
                 st.plotly_chart(sigma_bar_chart(sigma_by_stn, radar_stations),
                                width=W, config={"displayModeBar": False})
