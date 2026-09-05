@@ -785,15 +785,34 @@ HINTS = {
     "rm_map_states":
         "Narrows the region to just these states.",
     "rm_radar":
-        "Region average conditions against up to three stations, on a "
-        "percentile radar. Automatic best-match search is coming soon.",
+        "Region average conditions against your selected stations. "
+        "Distribution shows each as a percentile band; Distance shows "
+        "each as a single line at its per-variable departure. The "
+        "station window can sit anywhere in the year, independent of "
+        "the region's own window above.",
+    "rm_display_mode":
+        "Distribution draws each station as a percentile band, like the "
+        "region average conditions itself -- up to 3 stations, since six "
+        "annuli is twelve dashed contours and unreadable. Distance draws "
+        "each station as a single line at its per-variable departure "
+        "from the region, in station-interannual sigma units, with no "
+        "cap -- closer to how the analogue papers plot this themselves.",
+    "rm_auto_select":
+        "Runs the automatic search for the current location, reference "
+        "period, window length and variables, and fills the station and "
+        "window controls below with its answer.",
+    "rm_station_window":
+        "Same length as the region's window -- this only moves where in "
+        "the year it sits. Default matches the region's own window "
+        "exactly. Manual mode only: automatic selection gives each "
+        "station its own window instead.",
     "rm_sigma":
         "How many standard deviations apart the two climates are, across "
         "all selected variables at once, correlation between them removed "
         "(Mahony et al. 2017). Under 2σ is a representative analogue in "
-        "the literature; this is an absolute check, unlike the per-"
-        "variable table below, which only ranks the selected stations "
-        "against each other.",
+        "the literature; this is an absolute check, unlike the radar, "
+        "which only shows how the selected stations compare to each "
+        "other.",
     "rm_boxplots":
         "Coming soon: one boxplot per comparison variable, region against "
         "the selected stations.",
@@ -1480,16 +1499,28 @@ def search_best_matches(region_py, station_pentad, p_lo, p_hi, y_lo, y_hi,
     return dict(n_candidates=n_candidates, n_excluded=n_excluded, top=results)
 
 
+def _pentad_range(p_lo, p_hi, n_pentads=N_PENTADS_PER_YEAR):
+    """Inclusive pentad list from p_lo to p_hi -- wraps past n_pentads
+    back to 1 when p_lo > p_hi, station_pentad_year()'s own convention
+    for "this window wraps". Task 15 needs this in _avg_conus_percentile()
+    too: the radar's station side can now sit in a different, possibly
+    wrapping, part of the year than the region's fixed window."""
+    if p_lo <= p_hi:
+        return list(range(p_lo, p_hi + 1))
+    return list(range(p_lo, n_pentads + 1)) + list(range(1, p_hi + 1))
+
+
 def _avg_conus_percentile(value, variable, conus_scale, p_lo, p_hi):
     """A single raw value's CONUS percentile rank, averaged across every
-    pentad in the window. Positions a pooled p5/p95 on the radar's radial
-    axis the same way climate_dissimilarity() runs a pooled value through
-    every pentad's own scale in turn -- a raw value means a different
-    thing in January than in July -- but returns the value's own average
-    position rather than an already-differenced gap, since the radar
-    needs to place two separate rings, not one number."""
+    pentad in the window (p_lo > p_hi wraps -- see _pentad_range()).
+    Positions a pooled p5/p95 on the radar's radial axis the same way
+    climate_dissimilarity() runs a pooled value through every pentad's
+    own scale in turn -- a raw value means a different thing in January
+    than in July -- but returns the value's own average position rather
+    than an already-differenced gap, since the radar needs to place two
+    separate rings, not one number."""
     pcts = []
-    for p in range(p_lo, p_hi + 1):
+    for p in _pentad_range(p_lo, p_hi):
         scale = conus_scale[variable].get(p)
         if scale is not None and len(scale):
             pcts.append(_percentile_of(value, scale))
@@ -1518,41 +1549,54 @@ def _pct_to_r(pct):
 RADAR_SHOW_ALERTS = False
 
 
-def region_radar(variables, region_py, station_pentad, stations, focus,
-                 conus_scale, p_lo, p_hi, y_lo, y_hi, height=520):
+def region_radar(variables, region_py, station_pentad, stations,
+                 conus_scale, p_lo, p_hi, station_windows, y_lo, y_hi,
+                 focus=None, height=520):
     """The percentile radar. One axis per variable, fixed order (the
     caller's `variables` order, not selection order, so it doesn't
     reshuffle between reruns). Radial scale is the CONUS percentile,
     0-100, with RADAR_HOLE's hole at the centre -- see there. Region
     average conditions is a filled, low-opacity, thin-outlined band from
-    its pooled p5 to its pooled p95; each of `stations` (up to three,
-    STATION_COLORS) is the same band unfilled, dashed on both edges, so
-    it reads as an envelope meant to enclose the region. Alert segments —
-    thick, round-capped (faked with matching end markers; Plotly line
-    traces don't expose a cap style), in the accent colour, both tails,
-    driven by coverage()'s own asymmetric direction (region beyond
-    station) rather than climate_dissimilarity()'s symmetric gap, so a
-    station much wider than the region draws no segment — are built but
-    gated off by RADAR_SHOW_ALERTS (see there for why: a real but tiny
-    gap reads as a stray dot, not an alert, on exactly the axes where a
-    station is a good match). An axis where neither the region nor any
-    shown station varies at all is greyed (CLAUDE.md, "no meaningful
-    variation ... on either side"). All colours from THEMES/STATION_COLORS;
-    nothing hard-coded."""
+    its pooled p5 to its pooled p95 over `p_lo`-`p_hi`; each of
+    `stations` (up to three, STATION_COLORS) is the same band unfilled,
+    dashed on both edges, so it reads as an envelope meant to enclose the
+    region -- but over `station_windows[stn]`, an explicit
+    {station: (s_lo, s_hi)} map, since the automatic search can give each
+    of the top 3 its own window rather than one shared position; a
+    station's own window and `p_lo`-`p_hi` are frequently different
+    calendar pentads, each converted to a CONUS percentile through its
+    own window's average (_avg_conus_percentile()), since a raw value
+    means a different thing in different months on each side
+    independently. Alert segments — thick, round-capped (faked with
+    matching end markers; Plotly line traces don't expose a cap style),
+    in the accent colour, both tails, driven by coverage()'s own
+    asymmetric direction (region beyond station) rather than
+    climate_dissimilarity()'s symmetric gap, so a station much wider than
+    the region draws no segment — are built but gated off by
+    RADAR_SHOW_ALERTS (see there for why: a real but tiny gap reads as a
+    stray dot, not an alert, on exactly the axes where a station is a
+    good match). An axis where neither the region nor any shown station
+    varies at all is greyed (CLAUDE.md, "no meaningful variation ... on
+    either side"). All colours from THEMES/STATION_COLORS; nothing
+    hard-coded."""
     n = len(variables)
     angles = [i * 360 / n for i in range(n)]
 
-    def pooled_pct(py, v):
+    def pooled_pct(py, v, w_lo, w_hi):
         lo, hi = np.percentile(py[v], [5, 95])
-        return (_avg_conus_percentile(lo, v, conus_scale, p_lo, p_hi),
-                _avg_conus_percentile(hi, v, conus_scale, p_lo, p_hi))
+        return (_avg_conus_percentile(lo, v, conus_scale, w_lo, w_hi),
+                _avg_conus_percentile(hi, v, conus_scale, w_lo, w_hi))
 
-    region_pct = {v: pooled_pct(region_py, v) for v in variables}
+    region_pct = {v: pooled_pct(region_py, v, p_lo, p_hi) for v in variables}
 
-    station_py = {stn: station_pentad_year(station_pentad, stn, p_lo, p_hi, y_lo, y_hi)
-                 for stn in stations}
-    station_pct = {stn: {v: pooled_pct(station_py[stn], v) for v in variables}
-                  for stn in stations}
+    station_py = {}
+    for stn in stations:
+        s_lo, s_hi = station_windows[stn]
+        station_py[stn] = station_pentad_year(station_pentad, stn, s_lo, s_hi, y_lo, y_hi)
+    station_pct = {}
+    for stn in stations:
+        s_lo, s_hi = station_windows[stn]
+        station_pct[stn] = {v: pooled_pct(station_py[stn], v, s_lo, s_hi) for v in variables}
 
     greyed = set()
     for v in variables:
@@ -1641,6 +1685,143 @@ def region_radar(variables, region_py, station_pentad, stations, focus,
                 tickfont=dict(color=T["text"])),
         ),
         margin=dict(l=40, r=40, t=30, b=10))
+    return fig
+
+
+def region_radar_distance(variables, region_py, station_pentad, stations,
+                          station_windows, y_lo, y_hi, height=520):
+    """The "Distance" display mode: each station drawn as a single
+    unfilled line, not a band, one point per axis -- in the spirit of
+    the sigma-dissimilarity literature's own per-variable diagnostic
+    plots (Mahony et al. 2017; Fitzpatrick & Dunn 2019), rather than
+    Distribution mode's band overlap. The point for each variable is
+    |z|, sigma_dissimilarity()'s own region-minus-station departure,
+    scaled by the station's interannual SD over that station's own
+    window -- `station_windows[stn]`, an explicit {station: (s_lo, s_hi)}
+    map, since the automatic search can give each of the top 3 its own
+    window rather than one shared position -- so the two display modes
+    are two views of the same underlying numbers, not a second,
+    separately-tuned measure.
+
+    The region is the origin every line is measured against
+    (mathematically r=0 on every axis), but is drawn explicitly anyway,
+    as a degenerate "ring" collapsed to the centre point, legended
+    "Region average conditions": leaving it as an unlabelled implicit
+    zero gave the chart no visible baseline to read distances from.
+
+    A variable dropped for a station (no interannual variation there --
+    sigma_dissimilarity()'s own "usable" filter) cannot be scaled, so
+    that station's line does not connect through it: the point is drawn
+    as an open marker at the centre instead, since "no signal" and "an
+    exact match" are not the same claim and a connecting line would
+    assert the latter. An axis dropped for EVERY shown station is greyed
+    on the angular axis, the same "no meaningful variation on either
+    side" rule Distribution mode applies. The radial axis is linear in
+    station-interannual sigma units, 0 outward, with a floor of 3 so a
+    tight cluster of good matches near the centre isn't itself stretched
+    to fill the plot."""
+    n = len(variables)
+    angles = [i * 360 / n for i in range(n)]
+    theta_closed = angles + [angles[0]]
+
+    z_by_station, dropped_by_station = {}, {}
+    for stn in stations:
+        s_lo, s_hi = station_windows[stn]
+        res = sigma_dissimilarity(region_py, station_pentad, stn, s_lo, s_hi,
+                                  y_lo, y_hi, variables)
+        z_by_station[stn] = {v: res["per_variable"][v]["z"] for v in variables}
+        dropped_by_station[stn] = set(res["dropped"])
+
+    greyed = {v for v in variables if stations
+             and all(v in dropped_by_station[stn] for stn in stations)}
+
+    all_abs = [abs(z_by_station[stn][v]) for stn in stations for v in variables
+              if not np.isnan(z_by_station[stn][v])]
+    r_max = max(3.0, np.ceil(max(all_abs))) if all_abs else 3.0
+
+    fig = go.Figure()
+
+    # The region's own reference "ring": every point sits at r=0 -- there
+    # is nowhere else it could sit, since the whole chart is built from
+    # departures FROM the region -- but drawing it, rather than leaving
+    # it implicit, gives the chart a labelled, legended baseline.
+    fig.add_trace(go.Scatterpolar(
+        r=[0] * len(theta_closed), theta=theta_closed, mode="lines+markers",
+        line=dict(color=T["accent"], width=2),
+        marker=dict(color=T["accent"], size=7, symbol="circle"),
+        name="Region average conditions", hoverinfo="skip"))
+
+    for i, stn in enumerate(stations):
+        c = STATION_COLORS[i % len(STATION_COLORS)]
+        r = [0.0 if np.isnan(z_by_station[stn][v]) else abs(z_by_station[stn][v])
+            for v in variables]
+        fig.add_trace(go.Scatterpolar(
+            r=r + [r[0]], theta=theta_closed, mode="lines+markers",
+            line=dict(color=c, width=2), marker=dict(color=c, size=5),
+            name=stn, legendgroup=stn, hoverinfo="skip"))
+
+        dropped_idx = [j for j, v in enumerate(variables) if v in dropped_by_station[stn]]
+        if dropped_idx:
+            fig.add_trace(go.Scatterpolar(
+                r=[0] * len(dropped_idx), theta=[angles[j] for j in dropped_idx],
+                mode="markers", marker=dict(color=c, size=9, symbol="circle-open",
+                                            line=dict(width=2)),
+                name=stn, legendgroup=stn, showlegend=False, hoverinfo="skip"))
+
+    ticktext = [
+        f'<span style="color:{T["muted"]}">{GRID_VARS[v]["label"]}</span>'
+        if v in greyed else GRID_VARS[v]["label"]
+        for v in variables
+    ]
+    tickvals = list(range(0, int(r_max) + 1))
+    fig.update_layout(
+        height=height, showlegend=True,
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color=T["text"]),
+        legend=dict(orientation="h", yanchor="top", y=-0.1, x=0),
+        polar=dict(
+            bgcolor="rgba(0,0,0,0)",
+            radialaxis=dict(
+                range=[0, r_max], showline=True, linecolor=T["line"],
+                tickvals=tickvals, ticktext=[str(t) for t in tickvals],
+                gridcolor=T["line"], tickfont=dict(color=T["muted"]),
+                title=dict(text="station-interannual σ from region average conditions",
+                          font=dict(size=11, color=T["muted"]))),
+            angularaxis=dict(
+                tickvals=angles, ticktext=ticktext,
+                direction="clockwise", rotation=90,
+                gridcolor=T["line"], linecolor=T["line"],
+                tickfont=dict(color=T["text"])),
+        ),
+        margin=dict(l=40, r=40, t=30, b=10))
+    return fig
+
+
+def sigma_bar_chart(sigma_by_station, stations, height=260):
+    """Sigma dissimilarity per selected station, region average
+    conditions the implicit reference every bar is measured against,
+    with the literature's 2-sigma representative-analogue reference line
+    marked (Mahony et al. 2017): under it counts as a representative
+    analogue, above it progressively poor. One bar per station in
+    `stations`' order, STATION_COLORS matching the radar (either display
+    mode) so a bar and its radar line/band are the same colour."""
+    vals = [sigma_by_station[stn]["sigma"] for stn in stations]
+    colors = [STATION_COLORS[i % len(STATION_COLORS)] for i in range(len(stations))]
+    fig = go.Figure(go.Bar(x=stations, y=vals, marker_color=colors, hoverinfo="skip"))
+    fig.add_hline(y=2, line=dict(color=T["muted"], dash="dash", width=1.5),
+                 annotation_text="2σ — representative analogue threshold",
+                 annotation_font=dict(color=T["muted"], size=11),
+                 annotation_position="top left")
+    fig.update_layout(
+        height=height, showlegend=False,
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color=T["text"]),
+        title=dict(text="Sigma dissimilarity from region average conditions",
+                  font=dict(size=13, color=T["text"])),
+        yaxis=dict(title="sigma dissimilarity", gridcolor=T["line"],
+                  zerolinecolor=T["line"]),
+        xaxis=dict(gridcolor=T["line"]),
+        margin=dict(l=40, r=20, t=40, b=10))
     return fig
 
 
@@ -2057,103 +2238,212 @@ elif section == "Region Matching":
             # Fixed order every render: the caller's declared GRID_VARS order,
             # not multiselect selection order, which can reshuffle on rerun.
             ordered_vars = [v for v in GRID_VARS if v in rm_vars]
+            # The station window always matches the region window's LENGTH,
+            # not its position -- the slider below only translates.
+            win_pentads = p_hi - p_lo + 1
 
             region_py = region_pentad_year(state_pentad, state_weights,
                                            selected_states, p_lo, p_hi,
                                            y_lo, y_hi, ordered_vars)
             scale = conus_percentile_scale(y_lo, y_hi)
 
-            radar_col, control_col = st.columns([3, 2])
+            st.session_state.setdefault("rm_radar_stations", [all_stations[0]])
+            st.session_state.setdefault("rm_station_window_start", p_lo)
+            st.session_state.setdefault("rm_auto_select", False)
+            st.session_state.setdefault("rm_display_mode", "Distribution")
 
-            with control_col:
-                st.session_state.setdefault("rm_focus_stations", [all_stations[0]])
-                st.multiselect("Stations (up to 3)", all_stations, max_selections=3,
-                               key="rm_focus_stations")
-                focus_stations = st.session_state.get("rm_focus_stations") or []
+            auto = st.session_state.rm_auto_select
+            cap = 3 if st.session_state.rm_display_mode == "Distribution" else None
 
-                # The focus picker only matters for the alert segments,
-                # currently off (RADAR_SHOW_ALERTS) -- showing a control
-                # with no visible effect would be worse than not showing
-                # it, so it's gated the same way.
-                if RADAR_SHOW_ALERTS and len(focus_stations) > 1:
-                    if st.session_state.get("rm_focus") not in focus_stations:
-                        st.session_state.rm_focus = focus_stations[0]
-                    st.radio("Focus (alert segments)", focus_stations, key="rm_focus")
-                    focused = st.session_state.rm_focus
-                elif focus_stations:
-                    focused = focus_stations[0]
+            search_res = None
+            if auto:
+                search_res = search_best_matches(region_py, station_pentad,
+                                                 p_lo, p_hi, y_lo, y_hi,
+                                                 ordered_vars, top_k=3)
+                auto_stations = []
+                for r in search_res["top"]:
+                    if r["station"] not in auto_stations:
+                        auto_stations.append(r["station"])
+                if cap:
+                    auto_stations = auto_stations[:cap]
+                st.session_state.rm_radar_stations = auto_stations or [all_stations[0]]
+            elif cap and len(st.session_state.rm_radar_stations) > cap:
+                # Streamlit resets a multiselect's stored value to []
+                # if its own max_selections= changes between reruns of
+                # the SAME keyed widget (verified directly) -- toggling
+                # Distribution <-> Distance was doing exactly that, so
+                # max_selections= is never passed to the widget below at
+                # all; this trim (and the search's own cap above) is the
+                # only enforcement of the Distribution cap.
+                st.session_state.rm_radar_stations = st.session_state.rm_radar_stations[:cap]
+
+            ctrl_stations, ctrl_window, ctrl_mode = st.columns([3, 4, 2])
+
+            with ctrl_mode:
+                st.radio("Display", ["Distribution", "Distance"],
+                        key="rm_display_mode", help=HINTS["rm_display_mode"])
+
+            with ctrl_stations:
+                cap_label = "up to 3" if cap else "any number"
+                st.multiselect(f"Stations ({cap_label})", all_stations,
+                               key="rm_radar_stations", disabled=auto)
+                st.checkbox("Automatic selection", key="rm_auto_select",
+                           help=HINTS["rm_auto_select"])
+
+            with ctrl_window:
+                if auto:
+                    # Replaced, not merely disabled: one shared slider
+                    # cannot hold three positions once each of the
+                    # automatic top 3 has its own window -- the per-
+                    # station table below is what shows those instead.
+                    st.caption("Station window")
+                    st.caption("Each station uses its own automatically "
+                              "found window — see the table below.")
                 else:
-                    focused = None
+                    def _fmt_station_window(s, _win=win_pentads):
+                        sd, ed, wrapped = window_date_range(s, _win)
+                        return f"{sd:%b %d}–{ed:%b %d}{' (+1y)' if wrapped else ''}"
 
-            with radar_col:
-                fig = region_radar(ordered_vars, region_py, station_pentad,
-                                   focus_stations, focused, scale,
-                                   p_lo, p_hi, y_lo, y_hi)
-                st.plotly_chart(fig, width=W, config={"displayModeBar": False})
-                st.caption(f"{p_lo}–{p_hi} pentads ({win_days} days) · "
-                          f"{y_lo}–{y_hi} · {len(selected_states)} state"
-                          f"{'s' if len(selected_states) != 1 else ''} in region "
-                          f"average conditions")
+                    st.select_slider("Station window", options=SEARCH_STARTS,
+                                    format_func=_fmt_station_window,
+                                    key="rm_station_window_start",
+                                    help=HINTS["rm_station_window"])
 
-            with control_col:
-                if focus_stations:
-                    cov_by_stn = {
-                        stn: coverage(region_py, station_pentad, stn,
-                                     p_lo, p_hi, y_lo, y_hi, ordered_vars)
-                        for stn in focus_stations
-                    }
-                    sigma_by_stn = {
-                        stn: sigma_dissimilarity(region_py, station_pentad, stn,
-                                                p_lo, p_hi, y_lo, y_hi, ordered_vars)
-                        for stn in focus_stations
-                    }
-                    width_by_stn = {
-                        stn: width_ratio(region_py, station_pentad, stn,
-                                        p_lo, p_hi, y_lo, y_hi, ordered_vars)
-                        for stn in focus_stations
-                    }
+            radar_stations = st.session_state.rm_radar_stations or []
 
-                    sig_cols = st.columns(len(focus_stations))
-                    for col, stn in zip(sig_cols, focus_stations):
+            # station_windows: {station: (s_lo, s_hi)}. Manual mode shares
+            # one window (the slider above) across every shown station;
+            # automatic mode gives each its own -- search_best_matches()'s
+            # own answer for that station -- since the top 3 are frequently
+            # not the same window at all.
+            if auto and search_res is not None:
+                auto_window_by_station = {}
+                for r in search_res["top"]:
+                    auto_window_by_station.setdefault(r["station"], (r["p_lo"], r["p_hi"]))
+                station_windows = {
+                    stn: auto_window_by_station.get(stn, (p_lo, p_hi))
+                    for stn in radar_stations
+                }
+            else:
+                s_lo, s_hi = _wrapped_window(st.session_state.rm_station_window_start,
+                                            win_pentads)
+                station_windows = {stn: (s_lo, s_hi) for stn in radar_stations}
+
+            if not radar_stations:
+                st.info("Select at least one station above to see the radar.")
+            else:
+                sigma_by_stn = {}
+                for stn in radar_stations:
+                    s_lo, s_hi = station_windows[stn]
+                    sigma_by_stn[stn] = sigma_dissimilarity(
+                        region_py, station_pentad, stn, s_lo, s_hi, y_lo, y_hi, ordered_vars)
+
+                if auto:
+                    auto_rows = []
+                    for stn in radar_stations:
+                        s_lo, s_hi = station_windows[stn]
+                        sd, ed, wrapped = window_date_range(s_lo, win_pentads)
                         sig = sigma_by_stn[stn]["sigma"]
-                        if np.isnan(sig):
-                            col.metric(f"{stn} sigma dissimilarity", "n/a",
-                                      help=HINTS["rm_sigma"])
+                        auto_rows.append({
+                            "Station": stn,
+                            "Window": f"{sd:%b %d}–{ed:%b %d}{' (+1y)' if wrapped else ''}",
+                            "Sigma": f"{sig:.2f}" if not np.isnan(sig) else "n/a",
+                        })
+                    st.dataframe(pd.DataFrame(auto_rows), width=W, hide_index=True)
+
+                if st.session_state.rm_display_mode == "Distribution":
+                    fig = region_radar(ordered_vars, region_py, station_pentad,
+                                       radar_stations, scale, p_lo, p_hi,
+                                       station_windows, y_lo, y_hi)
+                else:
+                    fig = region_radar_distance(ordered_vars, region_py, station_pentad,
+                                               radar_stations, station_windows, y_lo, y_hi)
+                st.plotly_chart(fig, width=W, config={"displayModeBar": False})
+
+                region_caption = (
+                    f"Region average conditions: {p_lo}–{p_hi} pentads "
+                    f"({win_days} days) · {y_lo}–{y_hi} · {len(selected_states)} "
+                    f"state{'s' if len(selected_states) != 1 else ''}.")
+                if auto:
+                    st.caption(f"{region_caption} Each station above at its own "
+                              "automatically found window.")
+                else:
+                    s_lo, s_hi = station_windows[radar_stations[0]]
+                    s_start_date, s_end_date, s_wrapped = window_date_range(
+                        s_lo, win_pentads)
+                    st.caption(
+                        f"{region_caption} Station window: "
+                        f"{s_start_date:%b %d}–{s_end_date:%b %d}"
+                        f"{' (wraps into next year)' if s_wrapped else ''}.")
+
+                st.plotly_chart(sigma_bar_chart(sigma_by_stn, radar_stations),
+                               width=W, config={"displayModeBar": False})
+                st.caption(HINTS["rm_sigma"])
+
+                dropped_msg = "; ".join(
+                    f"{stn}: " + ", ".join(GRID_VARS[v]["label"]
+                                          for v in sigma_by_stn[stn]["dropped"])
+                    for stn in radar_stations if sigma_by_stn[stn]["dropped"])
+                if dropped_msg:
+                    st.caption("Dropped from sigma dissimilarity — no interannual "
+                              f"variation at the station: {dropped_msg}")
+
+                # Per-variable table: one column per station, not one per
+                # metric. A toggle switches every station's column at once
+                # between the departure in native display units
+                # (convert_delta(), since it is a difference) and the same
+                # departure standardised by the station's own interannual
+                # SD -- sigma_dissimilarity()'s own per-variable z, the
+                # exact number the Distance radar plots, so the table and
+                # that chart always agree.
+                st.session_state.setdefault("rm_table_units", "Native units")
+                st.radio("Units", ["Native units", "Interannual SD units"],
+                        key="rm_table_units", horizontal=True,
+                        label_visibility="collapsed")
+                standardized = st.session_state.rm_table_units == "Interannual SD units"
+
+                def _station_col_header(stn):
+                    # Automatic mode: the header itself carries that
+                    # station's own window and sigma, since each of the
+                    # top 3 generally has a different one -- without this
+                    # a column of numbers alone wouldn't say which window
+                    # it was computed over.
+                    if not auto:
+                        return stn
+                    s_lo, s_hi = station_windows[stn]
+                    sd, ed, wrapped = window_date_range(s_lo, win_pentads)
+                    sig = sigma_by_stn[stn]["sigma"]
+                    sig_txt = f"{sig:.2f}σ" if not np.isnan(sig) else "n/a"
+                    return (f"{stn} ({sd:%b %d}–{ed:%b %d}"
+                           f"{' +1y' if wrapped else ''}, {sig_txt})")
+
+                rows = []
+                for v in ordered_vars:
+                    kind = GRID_VARS[v]["kind"]
+                    rate_scale = win_days if v in RATE_VARS else 1
+                    var_label = GRID_VARS[v]["label"]
+                    rec = {"Variable": var_label if standardized
+                          else f"{var_label}{unit_suffix(kind, metric)}"}
+                    for stn in radar_stations:
+                        col = _station_col_header(stn)
+                        if standardized:
+                            z = sigma_by_stn[stn]["per_variable"][v]["z"]
+                            rec[col] = round(z, 2) if not np.isnan(z) else None
                         else:
-                            col.metric(f"{stn} sigma dissimilarity", f"{sig:.2f}σ",
-                                      help=HINTS["rm_sigma"])
-                            if sig < 2:
-                                col.caption("Under 2σ — a representative analogue.")
-
-                    dropped_msg = "; ".join(
-                        f"{stn}: " + ", ".join(GRID_VARS[v]["label"]
-                                              for v in sigma_by_stn[stn]["dropped"])
-                        for stn in focus_stations if sigma_by_stn[stn]["dropped"])
-                    if dropped_msg:
-                        st.caption("Dropped from sigma dissimilarity — no "
-                                  f"interannual variation at the station: {dropped_msg}")
-
-                    rows = []
-                    for v in ordered_vars:
-                        kind = GRID_VARS[v]["kind"]
-                        rate_scale = win_days if v in RATE_VARS else 1
-                        rec = {"Variable": f"{GRID_VARS[v]['label']}{unit_suffix(kind, metric)}"}
-                        for stn in focus_stations:
-                            rec[f"{stn} coverage"] = round(cov_by_stn[stn][v], 2)
                             dep_raw = (sigma_by_stn[stn]["per_variable"][v]["departure"]
                                       * rate_scale)
-                            rec[f"{stn} departure"] = round(
-                                convert_delta(dep_raw, kind, metric), 2)
-                            wr = width_by_stn[stn][v]
-                            rec[f"{stn} width ratio"] = round(wr, 2) if not np.isnan(wr) else None
-                        rows.append(rec)
-                    st.dataframe(pd.DataFrame(rows), width=W, hide_index=True)
-                    st.caption("Coverage: share of region average conditions inside "
-                              "the station's band (MESS). Departure: region average "
-                              "conditions minus station, signed, native units. Width "
-                              "ratio: station band width ÷ region band width — "
-                              "above 1 means the station covers partly by being wider "
-                              "than the region, not by sitting on it.")
+                            rec[col] = round(convert_delta(dep_raw, kind, metric), 2)
+                    rows.append(rec)
+                st.dataframe(pd.DataFrame(rows), width=W, hide_index=True)
+                if standardized:
+                    st.caption("Departure in station-interannual sigma units: "
+                              "region average conditions minus station, divided "
+                              "by that station's own interannual SD -- the same "
+                              "number the Distance radar's axes plot. Blank: no "
+                              "interannual variation at the station to divide by.")
+                else:
+                    st.caption("Departure in native units: region average "
+                              "conditions minus station, signed.")
 
     with st.container(key="rm_block_boxplots"), \
          st.expander("7. Boxplots", expanded=False):
