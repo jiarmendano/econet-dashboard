@@ -786,17 +786,19 @@ HINTS = {
         "Narrows the region to just these states.",
     "rm_radar":
         "Region average conditions against your selected stations. "
-        "Distribution shows each as a percentile band; Distance shows "
-        "each as a single line at its per-variable departure. The "
-        "station window can sit anywhere in the year, independent of "
-        "the region's own window above.",
+        "Distribution shows each as a percentile band; Departure shows "
+        "each as a single line at its per-variable departure, coloured "
+        "by sigma band. The station window can sit anywhere in the "
+        "year, independent of the region's own window above.",
     "rm_display_mode":
         "Distribution draws each station as a percentile band, like the "
         "region average conditions itself -- up to 3 stations, since six "
-        "annuli is twelve dashed contours and unreadable. Distance draws "
+        "annuli is twelve dashed contours and unreadable. Departure draws "
         "each station as a single line at its per-variable departure "
         "from the region, in station-interannual sigma units, with no "
-        "cap -- closer to how the analogue papers plot this themselves.",
+        "cap -- closer to how the analogue papers plot this themselves. "
+        "Its radial background is coloured green/yellow/orange/red by "
+        "sigma band.",
     "rm_auto_select":
         "Runs the automatic search for the current location, reference "
         "period, window length and variables, and fills the station and "
@@ -1688,20 +1690,75 @@ def region_radar(variables, region_py, station_pentad, stations,
     return fig
 
 
-def region_radar_distance(variables, region_py, station_pentad, stations,
-                          station_windows, y_lo, y_hi, height=520):
-    """The "Distance" display mode: each station drawn as a single
-    unfilled line, not a band, one point per axis -- in the spirit of
-    the sigma-dissimilarity literature's own per-variable diagnostic
-    plots (Mahony et al. 2017; Fitzpatrick & Dunn 2019), rather than
-    Distribution mode's band overlap. The point for each variable is
-    |z|, sigma_dissimilarity()'s own region-minus-station departure,
-    scaled by the station's interannual SD over that station's own
-    window -- `station_windows[stn]`, an explicit {station: (s_lo, s_hi)}
-    map, since the automatic search can give each of the top 3 its own
-    window rather than one shared position -- so the two display modes
-    are two views of the same underlying numbers, not a second,
-    separately-tuned measure.
+def _hex_to_rgba(hex_color, alpha):
+    """"#RRGGBB" -> "rgba(r,g,b,alpha)", for a fillcolor that needs to be
+    more transparent than its line -- Plotly's per-trace `opacity` would
+    fade both together."""
+    hex_color = hex_color.lstrip("#")
+    r, g, b = (int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
+    return f"rgba({r},{g},{b},{alpha})"
+
+
+# Mahony et al. (2017), as applied to climate analogues in Fitzpatrick &
+# Dunn (2019): 2 sigma is the chi distribution's 95th percentile and their
+# own upper limit for a representative analogue; 4 sigma is the 99.994th
+# percentile, which they label "extremely novel". Thresholds, a step
+# function, not a continuous colour scale -- that is how the papers
+# themselves report it, in bands, not a gradient.
+SIGMA_BANDS = [
+    (2.0, "#2E7D32"),           # under 2 sigma: representative analogue
+    (3.0, "#F9A825"),           # 2-3 sigma
+    (4.0, "#EF6C00"),           # 3-4 sigma
+    (float("inf"), "#C62828"),  # 4+ sigma: "extremely novel"
+]
+
+
+def sigma_band_color(sigma):
+    """The published-threshold colour (SIGMA_BANDS) a sigma dissimilarity
+    value falls in. NaN (no usable variable at all to compute a sigma
+    from) falls through to the last, most conservative band's colour --
+    there is no reading of "better than undefined" to give it a paler
+    one instead. Not currently called: region_radar_departure() colours
+    its radial BACKGROUND by these same bands instead of colouring each
+    station's own line by this function's per-station answer -- see its
+    docstring for why -- but the mapping stays defined and available in
+    case a future per-station colour cue (e.g. the bar chart, or the
+    auto-mode table) wants it."""
+    if np.isnan(sigma):
+        return SIGMA_BANDS[-1][1]
+    for threshold, color in SIGMA_BANDS:
+        if sigma < threshold:
+            return color
+    return SIGMA_BANDS[-1][1]
+
+
+def region_radar_departure(variables, region_py, station_pentad, stations,
+                           station_windows, y_lo, y_hi, height=520):
+    """The "Departure" display mode (renamed from "Distance" -- the term
+    this literature uses for deviation from a reference): each station
+    drawn as a single unfilled line, not a band, one point per axis -- in
+    the spirit of the sigma-dissimilarity literature's own per-variable
+    diagnostic plots (Mahony et al. 2017; Fitzpatrick & Dunn 2019),
+    rather than Distribution mode's band overlap. The point for each
+    variable is |z|, sigma_dissimilarity()'s own region-minus-station
+    departure, scaled by the station's interannual SD over that
+    station's own window -- `station_windows[stn]`, an explicit
+    {station: (s_lo, s_hi)} map, since the automatic search can give
+    each of the top 3 its own window rather than one shared position --
+    so the two display modes are two views of the same underlying
+    numbers, not a second, separately-tuned measure.
+
+    A first attempt coloured each station's own line/fill by its overall
+    sigma band, which read worse, not better: two stations in the same
+    band rendered identically, losing the ability to tell them apart at
+    all. Reworked so the RADIAL BACKGROUND itself carries the judgement
+    of match quality instead, leaving STATION_COLORS on the lines exactly
+    as Distribution mode uses them: filled annuli at SIGMA_BANDS' own
+    thresholds -- 0-2 green, 2-3 yellow, 3-4 orange, 4 and beyond red --
+    drawn first, underneath everything else, plus two extra-thick rings
+    at exactly 2 and 4 sigma so those two boundaries in particular read
+    as deliberate markers, not just two more of the ordinary integer
+    gridlines.
 
     The region is the origin every line is measured against
     (mathematically r=0 on every axis), but is drawn explicitly anyway,
@@ -1717,9 +1774,11 @@ def region_radar_distance(variables, region_py, station_pentad, stations,
     assert the latter. An axis dropped for EVERY shown station is greyed
     on the angular axis, the same "no meaningful variation on either
     side" rule Distribution mode applies. The radial axis is linear in
-    station-interannual sigma units, 0 outward, with a floor of 3 so a
-    tight cluster of good matches near the centre isn't itself stretched
-    to fill the plot."""
+    station-interannual sigma units, 0 outward, with a floor of 5 (not 3
+    as before the sigma bands: high enough that the red "extremely
+    novel" band always shows at least a sliver by default, so the full
+    traffic light is visible even when every station plotted is a good
+    match)."""
     n = len(variables)
     angles = [i * 360 / n for i in range(n)]
     theta_closed = angles + [angles[0]]
@@ -1737,9 +1796,38 @@ def region_radar_distance(variables, region_py, station_pentad, stations,
 
     all_abs = [abs(z_by_station[stn][v]) for stn in stations for v in variables
               if not np.isnan(z_by_station[stn][v])]
-    r_max = max(3.0, np.ceil(max(all_abs))) if all_abs else 3.0
+    r_max = max(5.0, np.ceil(max(all_abs))) if all_abs else 5.0
 
     fig = go.Figure()
+
+    # Traffic-light background, SIGMA_BANDS' own thresholds, drawn first
+    # so every later trace sits on top of it -- see the docstring for why
+    # this replaced colouring each station's own line by its band.
+    theta_circle = list(np.linspace(0, 360, 73))
+    band_ranges, prev = [], 0.0
+    for upper, color in SIGMA_BANDS:
+        hi = min(upper, r_max)
+        if hi > prev:
+            band_ranges.append((prev, hi, color))
+        prev = upper
+    for lo, hi, color in band_ranges:
+        fig.add_trace(go.Scatterpolar(
+            r=[lo] * len(theta_circle), theta=theta_circle, mode="lines",
+            line=dict(width=0), showlegend=False, hoverinfo="skip"))
+        fig.add_trace(go.Scatterpolar(
+            r=[hi] * len(theta_circle), theta=theta_circle, mode="lines",
+            fill="tonext", fillcolor=_hex_to_rgba(color, 0.18),
+            line=dict(width=0), showlegend=False, hoverinfo="skip"))
+
+    # The 2 and 4 sigma thresholds again, as extra-thick rings on top of
+    # the bands, so those two specifically (not just any integer) read as
+    # deliberate markers.
+    for threshold in (2.0, 4.0):
+        if threshold <= r_max:
+            fig.add_trace(go.Scatterpolar(
+                r=[threshold] * len(theta_circle), theta=theta_circle, mode="lines",
+                line=dict(color=T["text"], width=2.5),
+                showlegend=False, hoverinfo="skip"))
 
     # The region's own reference "ring": every point sits at r=0 -- there
     # is nowhere else it could sit, since the whole chart is built from
@@ -1799,17 +1887,28 @@ def region_radar_distance(variables, region_py, station_pentad, stations,
 
 def sigma_bar_chart(sigma_by_station, stations, height=260):
     """Sigma dissimilarity per selected station, region average
-    conditions the implicit reference every bar is measured against,
-    with the literature's 2-sigma representative-analogue reference line
-    marked (Mahony et al. 2017): under it counts as a representative
-    analogue, above it progressively poor. One bar per station in
-    `stations`' order, STATION_COLORS matching the radar (either display
-    mode) so a bar and its radar line/band are the same colour."""
+    conditions the implicit reference every bar is measured against, with
+    both of Mahony et al.'s (2017) published thresholds marked as
+    reference lines, the same ones region_radar_departure() colours its
+    fills by (SIGMA_BANDS): 2 sigma, the chi distribution's 95th
+    percentile and their upper limit for a representative analogue, and
+    4 sigma, the 99.994th percentile, "extremely novel" -- both as
+    applied to climate analogues in Fitzpatrick & Dunn (2019). One bar
+    per station in `stations`' order, STATION_COLORS matching Distribution
+    mode's radar (Departure mode colours by sigma band instead, not by
+    station, so there is no single matching colour to give the bars
+    there either — STATION_COLORS is still the more useful identity cue
+    for a bar chart, where every station gets its own labelled tick
+    regardless)."""
     vals = [sigma_by_station[stn]["sigma"] for stn in stations]
     colors = [STATION_COLORS[i % len(STATION_COLORS)] for i in range(len(stations))]
     fig = go.Figure(go.Bar(x=stations, y=vals, marker_color=colors, hoverinfo="skip"))
-    fig.add_hline(y=2, line=dict(color=T["muted"], dash="dash", width=1.5),
+    fig.add_hline(y=2, line=dict(color=SIGMA_BANDS[0][1], dash="dash", width=1.5),
                  annotation_text="2σ — representative analogue threshold",
+                 annotation_font=dict(color=T["muted"], size=11),
+                 annotation_position="top left")
+    fig.add_hline(y=4, line=dict(color=SIGMA_BANDS[-1][1], dash="dash", width=1.5),
+                 annotation_text="4σ — extremely novel",
                  annotation_font=dict(color=T["muted"], size=11),
                  annotation_position="top left")
     fig.update_layout(
@@ -2271,7 +2370,7 @@ elif section == "Region Matching":
                 # Streamlit resets a multiselect's stored value to []
                 # if its own max_selections= changes between reruns of
                 # the SAME keyed widget (verified directly) -- toggling
-                # Distribution <-> Distance was doing exactly that, so
+                # Distribution <-> Departure was doing exactly that, so
                 # max_selections= is never passed to the widget below at
                 # all; this trim (and the search's own cap above) is the
                 # only enforcement of the Distribution cap.
@@ -2280,7 +2379,7 @@ elif section == "Region Matching":
             ctrl_stations, ctrl_window, ctrl_mode = st.columns([3, 4, 2])
 
             with ctrl_mode:
-                st.radio("Display", ["Distribution", "Distance"],
+                st.radio("Display", ["Distribution", "Departure"],
                         key="rm_display_mode", help=HINTS["rm_display_mode"])
 
             with ctrl_stations:
@@ -2356,7 +2455,7 @@ elif section == "Region Matching":
                                        radar_stations, scale, p_lo, p_hi,
                                        station_windows, y_lo, y_hi)
                 else:
-                    fig = region_radar_distance(ordered_vars, region_py, station_pentad,
+                    fig = region_radar_departure(ordered_vars, region_py, station_pentad,
                                                radar_stations, station_windows, y_lo, y_hi)
                 st.plotly_chart(fig, width=W, config={"displayModeBar": False})
 
@@ -2394,7 +2493,7 @@ elif section == "Region Matching":
                 # (convert_delta(), since it is a difference) and the same
                 # departure standardised by the station's own interannual
                 # SD -- sigma_dissimilarity()'s own per-variable z, the
-                # exact number the Distance radar plots, so the table and
+                # exact number the Departure radar plots, so the table and
                 # that chart always agree.
                 st.session_state.setdefault("rm_table_units", "Native units")
                 st.radio("Units", ["Native units", "Interannual SD units"],
@@ -2439,7 +2538,7 @@ elif section == "Region Matching":
                     st.caption("Departure in station-interannual sigma units: "
                               "region average conditions minus station, divided "
                               "by that station's own interannual SD -- the same "
-                              "number the Distance radar's axes plot. Blank: no "
+                              "number the Departure radar's axes plot. Blank: no "
                               "interannual variation at the station to divide by.")
                 else:
                     st.caption("Departure in native units: region average "
