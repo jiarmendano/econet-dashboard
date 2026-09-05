@@ -818,7 +818,12 @@ HINTS = {
     "rm_auto_select":
         "Runs the automatic search for the current location, reference "
         "period, window length and variables, and fills the station and "
-        "window controls below with its answer.",
+        "window controls below with its answer. You can still remove "
+        "any of the stations it finds, but not add others while it's on.",
+    "rm_stations_auto":
+        "Automatically found for this location, reference period, window "
+        "length and variables. You can remove any of them from the "
+        "comparison, but not add others while automatic selection is on.",
     "rm_station_window":
         "The handle marks where the window starts; its length always "
         "matches the region's window. Sliding past December wraps into "
@@ -2466,17 +2471,36 @@ elif section == "Region Matching":
             cap = 3 if st.session_state.rm_display_mode == "Distribution" else None
 
             search_res = None
+            auto_stations = []
             if auto:
                 search_res = search_best_matches(region_py, station_pentad,
                                                  p_lo, p_hi, y_lo, y_hi,
                                                  ordered_vars, top_k=3)
-                auto_stations = []
                 for r in search_res["top"]:
                     if r["station"] not in auto_stations:
                         auto_stations.append(r["station"])
                 if cap:
                     auto_stations = auto_stations[:cap]
-                st.session_state.rm_radar_stations = auto_stations or [all_stations[0]]
+                if not auto_stations:
+                    auto_stations = [all_stations[0]]
+
+                # Only RESET the selection when the automatic result itself
+                # changes (a new search, or a cap that trims it
+                # differently) -- once the user has removed some of the
+                # auto-picked stations, that has to survive reruns that
+                # don't change what the search found, or every rerun would
+                # silently put the removed ones back. Removing is allowed;
+                # adding isn't, since the widget's own `options` below is
+                # `auto_stations`, not every station -- there is nothing
+                # else to add.
+                auto_sig = tuple(auto_stations)
+                if st.session_state.get("_rm_auto_stations_sig") != auto_sig:
+                    st.session_state.rm_radar_stations = list(auto_stations)
+                    st.session_state["_rm_auto_stations_sig"] = auto_sig
+                else:
+                    kept = [s for s in st.session_state.get("rm_radar_stations", [])
+                           if s in auto_stations]
+                    st.session_state.rm_radar_stations = kept or list(auto_stations)
             elif cap and len(st.session_state.rm_radar_stations) > cap:
                 # Streamlit resets a multiselect's stored value to []
                 # if its own max_selections= changes between reruns of
@@ -2494,10 +2518,29 @@ elif section == "Region Matching":
                         key="rm_display_mode", help=HINTS["rm_display_mode"])
 
             with ctrl_stations:
-                cap_label = "up to 3" if cap else "any number"
-                st.multiselect(f"Stations ({cap_label})", all_stations,
-                               key="rm_radar_stations", disabled=auto)
-                st.checkbox("Automatic selection", key="rm_auto_select",
+                if auto:
+                    # options is auto_stations, not all_stations, so
+                    # removing one is possible (an ordinary multiselect
+                    # deselect) but adding a station the search didn't
+                    # pick is not -- there is nothing else in the list to
+                    # add. Not disabled: disabling was what previously
+                    # blocked removal too.
+                    st.multiselect(f"Stations ({len(auto_stations)} found)",
+                                   auto_stations, key="rm_radar_stations",
+                                   help=HINTS["rm_stations_auto"])
+                else:
+                    cap_label = "up to 3" if cap else "any number"
+                    # No max_selections= here -- it must never vary
+                    # between reruns of this same keyed widget (see the
+                    # trim comment above for why), so the Distribution
+                    # cap is enforced entirely by that post-render trim.
+                    st.multiselect(f"Stations ({cap_label})", all_stations,
+                                   key="rm_radar_stations")
+                # Directly below the station picker it governs, not off
+                # in its own column of the control row. Named "...of
+                # stations" since that distinguishes it from a
+                # hypothetical automatic window/variable choice.
+                st.checkbox("Automatic selection of stations", key="rm_auto_select",
                            help=HINTS["rm_auto_select"])
 
             with ctrl_window:
