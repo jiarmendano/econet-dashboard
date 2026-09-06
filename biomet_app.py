@@ -1072,8 +1072,8 @@ def region_pentad_year(state_pentad, state_weights, states, p_lo, p_hi, y_lo, y_
     way a multi-state selection should behave. Collapses to one row per
     pentad x year (exactly what Task 9 asks for) and stops there: the
     shared building block behind both region_profile() (pooled stats
-    over the whole window) and climate_dissimilarity()/coverage()
-    (per-pentad stats)."""
+    over the whole window) and coverage()/sigma_dissimilarity()
+    (per-pentad-year stats)."""
     sub = state_pentad[
         state_pentad["state"].isin(states)
         & state_pentad["pentad"].between(p_lo, p_hi)
@@ -1129,13 +1129,13 @@ def station_profile(station_pentad, station, p_lo, p_hi, y_lo, y_hi,
 
 @st.cache_data(show_spinner="Building the national percentile scale")
 def conus_percentile_scale(y_lo, y_hi):
-    """The fixed yardstick climate_dissimilarity() converts every raw
-    p5/p95 onto: for each variable and each pentad, the sorted array of
-    all 48 states' state_pentad.parquet values in that pentad, over the
-    given reference period. A gap expressed in these units is comparable
-    across variables with entirely different native magnitudes (a THI
-    point is not a mm). Computed once per reference period and cached
-    (Task 10's own instruction), not rebuilt on every score call; reloads
+    """The fixed yardstick region_radar()'s rings are positioned onto,
+    via _avg_conus_percentile(): for each variable and each pentad, the
+    sorted array of all 48 states' state_pentad.parquet values in that
+    pentad, over the given reference period. A raw value's rank in
+    these units is comparable across variables with entirely different
+    native magnitudes (a THI point is not a mm). Computed once per
+    reference period and cached, not rebuilt on every render; reloads
     state_pentad.parquet via load_state_pentad() rather than taking it as
     an argument so Streamlit hashes two ints, not a 122k-row frame."""
     sp = load_state_pentad(STATE_PENTAD_PATH)
@@ -1152,67 +1152,6 @@ def _percentile_of(value, sorted_arr):
     if len(sorted_arr) == 0:
         return np.nan
     return 100 * np.searchsorted(sorted_arr, value, side="right") / len(sorted_arr)
-
-
-def climate_dissimilarity(region_py, station_pentad, station, conus_scale,
-                          p_lo, p_hi, y_lo, y_hi, variables):
-    """Climate analogue dissimilarity: "how alike are these two
-    climates" -- the score that ranks the six stations. Replaces what
-    this file used to call mess_score(). Per variable:
-
-        |region_p5 - station_p5| + |region_p95 - station_p95|
-
-    both pooled over the whole window (the same single band coverage()
-    and the eventual radar use), each side run through every pentad's
-    own CONUS percentile scale in turn (a raw value means a different
-    thing in January than in July, so the seasonal yardstick still has
-    to be per pentad even though the band being measured against it does
-    not) and averaged -- not summed -- over the window's pentads, then
-    summed across `variables` for the station's total. Cite: Grenier et
-    al. 2013, J. Appl. Meteor. Climatol. 52:4, for this choice of metric.
-
-    Why this replaced the old score, for the record: the old one summed
-    only the region's uncovered tails (asymmetric, MESS-derived), which
-    saturates. Once the region fell fully outside the station's range on
-    every pentad, the region's own value cancelled out of the
-    *between-station* difference and the score stopped depending on the
-    region at all -- interdiurnal_T2M landed on exactly 9.5238 in 29 of
-    48 states, driven entirely by which two stations were being
-    compared, not by the region. It also ignored over-coverage
-    entirely (a station far *wider* than the region scored the same as
-    a perfect match), which is why PRECTOTCORR was blind in about half
-    the country in every window tested. The symmetric absolute-difference
-    form here penalises both a station too narrow to cover the region
-    and one much wider than it, and an all-|.| sum of two non-negative,
-    unbounded terms does not saturate the same way.
-
-    Coverage -- genuine MESS, Elith, Kearney & Phillips (2010), the
-    asymmetric "does the station's range contain the region's" -- is a
-    separate function now, coverage(): a different question, not a
-    component of this one."""
-    sta_py = station_pentad_year(station_pentad, station, p_lo, p_hi, y_lo, y_hi)
-
-    out = {"total": 0.0}
-    for v in variables:
-        sta_p5, sta_p95 = np.percentile(sta_py[v], [5, 95])
-        region_p5, region_p95 = np.percentile(region_py[v], [5, 95])
-
-        pentad_dissim = []
-        for p in range(p_lo, p_hi + 1):
-            scale = conus_scale[v].get(p)
-            if scale is None or len(scale) == 0:
-                continue
-            r5_pct  = _percentile_of(region_p5, scale)
-            r95_pct = _percentile_of(region_p95, scale)
-            s5_pct  = _percentile_of(sta_p5, scale)
-            s95_pct = _percentile_of(sta_p95, scale)
-            pentad_dissim.append(abs(r5_pct - s5_pct) + abs(r95_pct - s95_pct))
-
-        dissim = float(np.mean(pentad_dissim)) if pentad_dissim else 0.0
-        out[v] = {"dissimilarity": dissim}
-        out["total"] += dissim
-
-    return out
 
 
 def _coverage_band_sample(pentad_year, v):
@@ -1256,12 +1195,12 @@ def coverage(region_py, station_pentad, station, p_lo, p_hi, y_lo, y_hi, variabl
     """Genuine MESS (Elith, Kearney & Phillips 2010): "does the station's
     range contain the region's?" Reference = station, projection =
     region (CLAUDE.md), asymmetric by design -- unlike
-    climate_dissimilarity(), over-coverage (station wider than the
+    sigma_dissimilarity(), over-coverage (station wider than the
     region) scores the same as a perfect match. Per variable, the pooled
     fraction of the region's values that fall inside the station's own
     p5-p95 for the whole window. Feeds the radar's red segments
     (region_radar()), called directly from there so the two can never
-    disagree; a separate question from climate_dissimilarity(), not a
+    disagree; a separate question from sigma_dissimilarity(), not a
     component of it, so it is not summed into a total here.
 
     RATE_VARS build that band differently -- see _coverage_band_sample(),
@@ -1290,17 +1229,21 @@ def coverage(region_py, station_pentad, station, p_lo, p_hi, y_lo, y_hi, variabl
 
 
 def width_ratio(region_py, station_pentad, station, p_lo, p_hi, y_lo, y_hi, variables):
-    """Station band width / region band width, per variable -- both pooled
-    p95-p5 over the whole window, the same band coverage() and
-    climate_dissimilarity() use. Coverage alone cannot distinguish a
-    station that covers the region by sitting on top of it from one that
-    covers it by being much wider (a ratio well above 1); this makes that
-    visible without folding it into either score."""
+    """Station band width / region band width, per variable -- both
+    built from _coverage_band_sample(), the same shared axis coverage()
+    and region_radar() use (pooled pentad x year for continuous
+    variables, the per-year mean of the per-pentad rate for RATE_VARS),
+    so a width ratio reported here always describes the same band a
+    coverage number or a radar ring for that variable would show.
+    Coverage alone cannot distinguish a station that covers the region
+    by sitting on top of it from one that covers it by being three
+    times wider (a ratio well above 1); this is the only place that
+    distinction is visible, since it is not folded into either score."""
     sta_py = station_pentad_year(station_pentad, station, p_lo, p_hi, y_lo, y_hi)
     out = {}
     for v in variables:
-        r5, r95 = np.percentile(region_py[v], [5, 95])
-        s5, s95 = np.percentile(sta_py[v], [5, 95])
+        r5, r95 = np.percentile(_coverage_band_sample(region_py, v), [5, 95])
+        s5, s95 = np.percentile(_coverage_band_sample(sta_py, v), [5, 95])
         region_width = r95 - r5
         out[v] = float((s95 - s5) / region_width) if region_width > 0 else np.nan
     return out
@@ -1319,13 +1262,15 @@ def sigma_dissimilarity(region_py, station_pentad, station, p_lo, p_hi, y_lo, y_
     """Sigma dissimilarity (Mahony et al. 2017; applied to climate
     analogues in Fitzpatrick & Dunn 2019 and to US specialty-crop
     analogues in Parker et al. 2023, Sci Rep 13). Answers "is this a good
-    match at all", which climate_dissimilarity() cannot: that score is
-    unbounded and only ranks, whereas the chi-distribution conversion
-    below gives an absolute criterion (roughly under 2 sigma counts as a
-    representative analogue in the literature).
+    match at all" with an absolute, published criterion via the
+    chi-distribution conversion below (roughly under 2 sigma counts as a
+    representative analogue in the literature) -- what ranks the six
+    stations (search_best_matches()) as well as what a single reported
+    number can be judged against on its own, unlike a plain band-gap
+    sum, which is unbounded and only ranks.
 
-    Works on window MEANS, not bands -- unlike climate_dissimilarity()/
-    coverage(), which compare p5-p95 bands. Per variable:
+    Works on window MEANS, not bands -- unlike coverage(), which
+    compares p5-p95 bands. Per variable:
 
       1. The station's own interannual variability: one window mean per
          reference-period year at the station (averaging over the
@@ -1693,12 +1638,12 @@ def _pentad_range(p_lo, p_hi, n_pentads=N_PENTADS_PER_YEAR):
 def _avg_conus_percentile(value, variable, conus_scale, p_lo, p_hi):
     """A single raw value's CONUS percentile rank, averaged across every
     pentad in the window (p_lo > p_hi wraps -- see _pentad_range()).
-    Positions a pooled p5/p95 on the radar's radial axis the same way
-    climate_dissimilarity() runs a pooled value through every pentad's
-    own scale in turn -- a raw value means a different thing in January
-    than in July -- but returns the value's own average position rather
-    than an already-differenced gap, since the radar needs to place two
-    separate rings, not one number."""
+    Positions a pooled p5/p95 on the radar's radial axis by running it
+    through every pentad's own scale in turn -- a raw value means a
+    different thing in January than in July -- and returning the
+    value's own average position rather than an already-differenced
+    gap, since the radar needs to place two separate rings, not one
+    number."""
     pcts = []
     for p in _pentad_range(p_lo, p_hi):
         scale = conus_scale[variable].get(p)
@@ -2914,9 +2859,12 @@ elif section == "Region Matching":
                 st.info("Select at least one station above to see the radar.")
             else:
                 sigma_by_stn = {}
+                width_by_stn = {}
                 for stn in radar_stations:
                     s_lo, s_hi = station_windows[stn]
                     sigma_by_stn[stn] = sigma_dissimilarity(
+                        region_py, station_pentad, stn, s_lo, s_hi, y_lo, y_hi, ordered_vars)
+                    width_by_stn[stn] = width_ratio(
                         region_py, station_pentad, stn, s_lo, s_hi, y_lo, y_hi, ordered_vars)
 
                 if st.session_state.rm_display_mode == "Distribution":
@@ -2985,16 +2933,26 @@ elif section == "Region Matching":
                     # Per-variable table: one column per station, not one
                     # per metric. A toggle switches every station's column
                     # at once between the departure in native display
-                    # units (convert_delta(), since it is a difference)
-                    # and the same departure standardised by the
-                    # station's own interannual SD -- sigma_dissimilarity()'s
-                    # own per-variable z, the exact number the Departure
-                    # radar plots, so the table and that chart always agree.
+                    # units (convert_delta(), since it is a difference),
+                    # the same departure standardised by the station's
+                    # own interannual SD -- sigma_dissimilarity()'s own
+                    # per-variable z, the exact number the Departure radar
+                    # plots, so the table and that chart always agree --
+                    # and width_ratio(): the station's band width divided
+                    # by the region's, on the same _coverage_band_sample()
+                    # axis coverage() and the radar's rings use. Coverage
+                    # alone cannot tell a station that covers the region
+                    # by sitting on top of it from one that covers it by
+                    # being three times wider; this is the only place
+                    # that distinction is visible.
                     st.session_state.setdefault("rm_table_units", "Native units")
-                    st.radio("Units", ["Native units", "Interannual SD units"],
+                    st.radio("Units",
+                            ["Native units", "Interannual SD units", "Width ratio"],
                             key="rm_table_units", horizontal=True,
                             label_visibility="collapsed")
-                    standardized = st.session_state.rm_table_units == "Interannual SD units"
+                    table_mode = st.session_state.rm_table_units
+                    standardized = table_mode == "Interannual SD units"
+                    width_mode = table_mode == "Width ratio"
 
                     def _station_col_header(stn):
                         # Automatic mode: the header itself carries that
@@ -3016,11 +2974,14 @@ elif section == "Region Matching":
                         kind = GRID_VARS[v]["kind"]
                         rate_scale = win_days if v in RATE_VARS else 1
                         var_label = GRID_VARS[v]["label"]
-                        rec = {"Variable": var_label if standardized
+                        rec = {"Variable": var_label if standardized or width_mode
                               else f"{var_label}{unit_suffix(kind, metric)}"}
                         for stn in radar_stations:
                             col = _station_col_header(stn)
-                            if standardized:
+                            if width_mode:
+                                wr = width_by_stn[stn][v]
+                                rec[col] = round(wr, 2) if not np.isnan(wr) else None
+                            elif standardized:
                                 z = sigma_by_stn[stn]["per_variable"][v]["z"]
                                 rec[col] = round(z, 2) if not np.isnan(z) else None
                             else:
@@ -3029,7 +2990,14 @@ elif section == "Region Matching":
                                 rec[col] = round(convert_delta(dep_raw, kind, metric), 2)
                         rows.append(rec)
                     st.dataframe(pd.DataFrame(rows), width=W, hide_index=True)
-                    if standardized:
+                    if width_mode:
+                        st.caption("Station band width ÷ region band width. Above "
+                                  "1 means the station covers partly by being wider "
+                                  "than the region, not by sitting on it; below 1 "
+                                  "means the station's own band is narrower than the "
+                                  "region's, so even a covered region sits close to "
+                                  "the station's edge.")
+                    elif standardized:
                         st.caption("Departure in station-interannual sigma units: "
                                   "region average conditions minus station, divided "
                                   "by that station's own interannual SD -- the same "
