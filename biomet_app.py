@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 from scipy.stats import chi, norm
 
@@ -876,8 +877,11 @@ HINTS = {
         "which only shows how the selected stations compare to each "
         "other.",
     "rm_boxplots":
-        "Coming soon: one boxplot per comparison variable, region against "
-        "the selected stations.",
+        "One boxplot per comparison variable, region average conditions "
+        "against each selected station, same pooled pentad-mean sample "
+        "the radar's band is drawn from. In automatic mode each "
+        "station's own window is shown on its axis label, since they "
+        "can differ from one another.",
 }
 
 
@@ -2070,6 +2074,99 @@ def sigma_bar_chart(sigma_by_station, stations, height=260):
     return fig
 
 
+BOXPLOT_COLS = 3
+
+
+def region_station_boxplots(ordered_vars, region_py, station_pentad, stations,
+                            station_windows, p_lo, win_pentads, win_days,
+                            y_lo, y_hi, metric, auto, n_cols=BOXPLOT_COLS):
+    """One small boxplot per comparison variable, region average
+    conditions against each selected station -- BOXPLOT_COLS wide,
+    filling rows first, so the default six variables land as 2 rows by
+    3 columns and a larger selection simply grows more rows.
+
+    The sample drawn for each box is exactly the pooled pentad-mean
+    array region_radar()'s own pooled_pct() takes its p5/p95 from --
+    region_py[v] for the region, station_pentad_year(...)[v] over that
+    station's own window (station_windows[stn]) for each station, not
+    daily values or any other unpooled series. A box built from anything
+    else could read wider than the same pair's annulus on the radar,
+    which would mean this and the radar are answering different
+    questions; built from the same array, it never can. Individual
+    points are overlaid (Plotly's own boxpoints="all"), the same "the
+    sample stays visible, not just the box" the Time series section's
+    own year-by-year box already does.
+
+    RATE_VARS (mean/day, fraction of days) are scaled to a per-window
+    quantity by win_days first, the same scaling the per-variable table
+    applies to departures, so a box here reads in the same units as
+    everything else this section displays; DELTA_VARS go through
+    convert_delta() rather than convert() since DTR and
+    interdiurnal_T2M are temperature *differences*, not absolute
+    readings (no +32 offset makes sense for a range).
+
+    In automatic mode each station can sit at a genuinely different
+    window, so its own x-axis tick carries that window's dates --
+    without that, two boxes side by side would read as the same period
+    when they may not be. The region keeps region_radar()'s own colour
+    (T["accent"]); stations keep STATION_COLORS in `stations`' order, the
+    same colours the radar (either display mode) uses for them. Layout
+    only -- paper/font/grid styling is left to style_fig() via
+    chart_or_table(), the same as every other figure in this section."""
+    n = len(ordered_vars)
+    n_rows = (n + n_cols - 1) // n_cols
+    fig = make_subplots(rows=n_rows, cols=n_cols,
+                        subplot_titles=[GRID_VARS[v]["label"] for v in ordered_vars])
+
+    table_rows = []
+
+    def add_box(row, col, x_label, name, values, color, legendgroup, show_legend):
+        fig.add_trace(go.Box(
+            x=[x_label] * len(values), y=values, name=name,
+            legendgroup=legendgroup, showlegend=show_legend,
+            marker_color=color, line=dict(color=color),
+            boxpoints="all", hoverinfo="y"), row=row, col=col)
+
+    for i, v in enumerate(ordered_vars):
+        row, col = divmod(i, n_cols)
+        row, col = row + 1, col + 1
+        kind = GRID_VARS[v]["kind"]
+        rate_scale = win_days if v in RATE_VARS else 1
+        conv = convert_delta if v in DELTA_VARS else convert
+
+        def to_display(raw, _scale=rate_scale, _kind=kind, _conv=conv):
+            return _conv(raw * _scale, _kind, metric)
+
+        region_vals = to_display(region_py[v].to_numpy())
+        add_box(row, col, "Region", "Region", region_vals, T["accent"],
+               "Region", i == 0)
+        r_sd, r_ed, r_wrapped = window_date_range(p_lo, win_pentads)
+        region_win_txt = f"{r_sd:%b %d}–{r_ed:%b %d}{' (+1y)' if r_wrapped else ''}"
+        table_rows.extend(
+            {"Variable": GRID_VARS[v]["label"], "Group": "Region",
+            "Window": region_win_txt, "Value": round(val, 2)}
+            for val in region_vals)
+
+        for j, stn in enumerate(stations):
+            s_lo, s_hi = station_windows[stn]
+            stn_py = station_pentad_year(station_pentad, stn, s_lo, s_hi, y_lo, y_hi)
+            stn_vals = to_display(stn_py[v].to_numpy())
+            c = STATION_COLORS[j % len(STATION_COLORS)]
+            sd, ed, wrapped = window_date_range(s_lo, win_pentads)
+            win_txt = f"{sd:%b %d}–{ed:%b %d}{' (+1y)' if wrapped else ''}"
+            x_label = f"{stn}<br>{win_txt}" if auto else stn
+            add_box(row, col, x_label, stn, stn_vals, c, stn, i == 0)
+            table_rows.extend(
+                {"Variable": GRID_VARS[v]["label"], "Group": stn,
+                "Window": win_txt, "Value": round(val, 2)}
+                for val in stn_vals)
+
+        fig.update_yaxes(title_text=unit_label(kind, metric), row=row, col=col)
+
+    fig.update_layout(legend=dict(orientation="h", yanchor="bottom", y=1.05, x=0))
+    return fig, pd.DataFrame(table_rows)
+
+
 # ================================================================ sections ==
 
 if section == "Overview":
@@ -2852,6 +2949,20 @@ elif section == "Region Matching":
     with st.container(key="rm_block_boxplots"), \
          st.expander("6. Boxplots", expanded=False):
         st.caption(HINTS["rm_boxplots"])
+
+        if len(rm_vars) == 0:
+            st.info("Select at least one variable in block 3 to see the boxplots.")
+        elif not radar_stations:
+            st.info("Select at least one station in block 5 to see the boxplots.")
+        else:
+            n_rows = (len(ordered_vars) + BOXPLOT_COLS - 1) // BOXPLOT_COLS
+            box_fig, box_table = region_station_boxplots(
+                ordered_vars, region_py, station_pentad, radar_stations,
+                station_windows, p_lo, win_pentads, win_days, y_lo, y_hi,
+                metric, auto)
+            chart_or_table(box_fig, box_table, key="rm_boxplots_view",
+                           filename="region_station_boxplots.csv",
+                           height=260 * n_rows)
 
 
 # "Data" is hidden from NAV (Region Matching took its slot) but this branch
