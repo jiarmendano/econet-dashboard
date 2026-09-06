@@ -1203,6 +1203,12 @@ def coverage(region_py, station_pentad, station, p_lo, p_hi, y_lo, y_hi, variabl
     disagree; a separate question from sigma_dissimilarity(), not a
     component of it, so it is not summed into a total here.
 
+    Continuous variables (T2M, DTR, T2MDEW, ...) build that band from
+    the pooled pentad x year values, same as everywhere else in this
+    file: the pentad is the right unit there, since averaging over 5
+    days filters synoptic weather noise and leaves the climatic signal
+    that actually separates two places.
+
     RATE_VARS build that band differently -- see _coverage_band_sample(),
     shared verbatim with region_radar()'s own band/alert positions so
     the two can never disagree. Diagnosed directly: BAHA, GOLD, PLYM and
@@ -1234,7 +1240,7 @@ def width_ratio(region_py, station_pentad, station, p_lo, p_hi, y_lo, y_hi, vari
     and region_radar() use (pooled pentad x year for continuous
     variables, the per-year mean of the per-pentad rate for RATE_VARS),
     so a width ratio reported here always describes the same band a
-    coverage number or a radar ring for that variable would show.
+    coverage number and a radar ring for that variable would show.
     Coverage alone cannot distinguish a station that covers the region
     by sitting on top of it from one that covers it by being three
     times wider (a ratio well above 1); this is the only place that
@@ -2123,25 +2129,37 @@ def region_station_boxplots(ordered_vars, region_py, station_pentad, stations,
     filling rows first, so the default six variables land as 2 rows by
     3 columns and a larger selection simply grows more rows.
 
-    The sample drawn for each box is exactly the pooled pentad-mean
-    array region_radar()'s own pooled_pct() takes its p5/p95 from --
-    region_py[v] for the region, station_pentad_year(...)[v] over that
-    station's own window (station_windows[stn]) for each station, not
-    daily values or any other unpooled series. A box built from anything
-    else could read wider than the same pair's annulus on the radar,
-    which would mean this and the radar are answering different
-    questions; built from the same array, it never can. Individual
-    points are overlaid (Plotly's own boxpoints="all"), the same "the
-    sample stays visible, not just the box" the Time series section's
-    own year-by-year box already does.
+    The sample drawn for each box is exactly _coverage_band_sample() --
+    the same shared helper coverage() and region_radar()'s own
+    pooled_pct() call, so a box here can never be wider than the same
+    pair's annulus on the radar, nor describe a different distribution
+    than what an alert segment (or a width-ratio row) for that same
+    variable is judging: the pooled pentad x year values for continuous
+    variables, but for RATE_VARS (PRECTOTCORR, THI_ge_79) the per-year
+    mean of the per-pentad rate -- one point per reference year (35, not
+    420), not one per pentad per year. Using the raw pooled pentad-year
+    sample here instead, even scaled, was the exact bug this shares its
+    fix with: THI_ge_79 only takes six values per pentad (0/5 ... 5/5),
+    so plotting 420 individually-scaled points clustered them into six
+    visible groups (win_days/5 apart -- 12 days apart at the default
+    60-day window) instead of a genuine per-year spread, and could read
+    wider than the radar's own band for the identical pair. Not daily
+    values or any other unpooled series either way. Individual points
+    are overlaid (Plotly's own boxpoints="all"), the same "the sample
+    stays visible, not just the box" the Time series section's own
+    year-by-year box already does.
 
-    RATE_VARS (mean/day, fraction of days) are scaled to a per-window
-    quantity by win_days first, the same scaling the per-variable table
-    applies to departures, so a box here reads in the same units as
-    everything else this section displays; DELTA_VARS go through
-    convert_delta() rather than convert() since DTR and
-    interdiurnal_T2M are temperature *differences*, not absolute
-    readings (no +32 offset makes sense for a range).
+    RATE_VARS are then scaled to a per-window quantity by win_days, the
+    same scaling the per-variable table applies to departures: since
+    _coverage_band_sample() already reduced RATE_VARS to a per-year mean
+    rate, multiplying that by win_days recovers the exact window-year
+    total (mean rate x win_days == fraction x 5 summed over the window's
+    pentads that year, the same identity the results table and
+    coverage() rely on) -- a genuine integer day-count per year for a
+    station, not an artefact of scaling an already-quantised pentad
+    value. DELTA_VARS go through convert_delta() rather than convert()
+    since DTR and interdiurnal_T2M are temperature *differences*, not
+    absolute readings (no +32 offset makes sense for a range).
 
     In automatic mode each station can sit at a genuinely different
     window, so its own x-axis tick carries that window's dates --
@@ -2175,7 +2193,7 @@ def region_station_boxplots(ordered_vars, region_py, station_pentad, stations,
         def to_display(raw, _scale=rate_scale, _kind=kind, _conv=conv):
             return _conv(raw * _scale, _kind, metric)
 
-        region_vals = to_display(region_py[v].to_numpy())
+        region_vals = to_display(_coverage_band_sample(region_py, v))
         add_box(row, col, "Region", "Region", region_vals, T["accent"],
                "Region", i == 0)
         r_sd, r_ed, r_wrapped = window_date_range(p_lo, win_pentads)
@@ -2188,7 +2206,7 @@ def region_station_boxplots(ordered_vars, region_py, station_pentad, stations,
         for j, stn in enumerate(stations):
             s_lo, s_hi = station_windows[stn]
             stn_py = station_pentad_year(station_pentad, stn, s_lo, s_hi, y_lo, y_hi)
-            stn_vals = to_display(stn_py[v].to_numpy())
+            stn_vals = to_display(_coverage_band_sample(stn_py, v))
             c = STATION_COLORS[j % len(STATION_COLORS)]
             sd, ed, wrapped = window_date_range(s_lo, win_pentads)
             win_txt = f"{sd:%b %d}–{ed:%b %d}{' (+1y)' if wrapped else ''}"
