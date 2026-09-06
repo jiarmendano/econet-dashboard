@@ -1215,23 +1215,68 @@ def climate_dissimilarity(region_py, station_pentad, station, conus_scale,
     return out
 
 
+def _window_year_totals(pentad_year, v):
+    """RATE_VARS (PRECTOTCORR, THI_ge_79) store a per-pentad RATE --
+    mean/day, fraction of days -- not a total. fraction*5 is the exact
+    day-count for that one pentad (an integer for a station, its own
+    single cell; a continuous area-blend equivalent for a region/state,
+    averaged across cells first); summed over the window's pentads for
+    a given year, it is the exact window total for that year, no
+    information lost relative to a genuinely daily series -- the
+    pentad's own 5-day grouping does not throw anything away, see
+    _pentad_range()'s sibling reasoning. Used to rebuild coverage()'s
+    band on the WINDOW-YEAR axis instead of the pooled pentad-year one:
+    one value per reference year, not one per pentad per year."""
+    return pentad_year.groupby("year")[v].apply(lambda s: (s * 5).sum()).to_numpy()
+
+
 def coverage(region_py, station_pentad, station, p_lo, p_hi, y_lo, y_hi, variables):
     """Genuine MESS (Elith, Kearney & Phillips 2010): "does the station's
     range contain the region's?" Reference = station, projection =
     region (CLAUDE.md), asymmetric by design -- unlike
     climate_dissimilarity(), over-coverage (station wider than the
     region) scores the same as a perfect match. Per variable, the pooled
-    fraction of the region's pentad x year values that fall inside the
-    station's own pooled p5-p95 for the whole window. Feeds the radar's
-    red segments (region_radar()); a separate question from
-    climate_dissimilarity(), not a component of it, so it is not summed
-    into a total here."""
+    fraction of the region's values that fall inside the station's own
+    p5-p95 for the whole window. Feeds the radar's red segments
+    (region_radar()); a separate question from climate_dissimilarity(),
+    not a component of it, so it is not summed into a total here.
+
+    Continuous variables (T2M, DTR, T2MDEW, ...) build that band from
+    the pooled pentad x year values, same as everywhere else in this
+    file: the pentad is the right unit there, since averaging over 5
+    days filters synoptic weather noise and leaves the climatic signal
+    that actually separates two places.
+
+    RATE_VARS do not: pooling 420 raw pentad-year fractions (12 pentads
+    x 35 reference years, say) treats each pentad as an independent
+    draw, which for THI_ge_79's six possible levels (0/5 ... 5/5) packs
+    enough mass at 0 and 1 that the station's own p5-p95 routinely comes
+    out as the full [0, 1] -- a band wide enough to swallow almost any
+    region value, regardless of how different the two climates actually
+    are. Diagnosed directly: BAHA, GOLD, PLYM and REID (NC's lowland
+    stations, 20-49 heat-stress days a year against Maine's near-zero)
+    all scored coverage 1.0 against Maine under the pooled axis. Fixed
+    by building the RATE_VARS band on the WINDOW-YEAR axis instead
+    (_window_year_totals(): one exact window total per reference year,
+    35 values, not 420) -- the same axis sigma_dissimilarity() already
+    uses for its own per-year mean, and the same total the results
+    table already scales RATE_VARS to for display. Under it, those same
+    four stations correctly drop to 0.0-0.83 against Maine; LAUR and
+    WAYN, the two mountain stations with genuinely low heat-stress
+    exposure, stay at 1.0 under both axes -- that agreement was real,
+    not an artefact of the fix."""
     sta_py = station_pentad_year(station_pentad, station, p_lo, p_hi, y_lo, y_hi)
 
     out = {}
     for v in variables:
-        sta_p5, sta_p95 = np.percentile(sta_py[v], [5, 95])
-        region_vals = region_py[v].to_numpy()
+        if v in RATE_VARS:
+            sta_vals = _window_year_totals(sta_py, v)
+            region_vals = _window_year_totals(region_py, v)
+        else:
+            sta_vals = sta_py[v].to_numpy()
+            region_vals = region_py[v].to_numpy()
+
+        sta_p5, sta_p95 = np.percentile(sta_vals, [5, 95])
         out[v] = float(np.mean((region_vals >= sta_p5) & (region_vals <= sta_p95)))
 
     return out
