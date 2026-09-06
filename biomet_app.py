@@ -839,13 +839,10 @@ HINTS = {
         "Region average conditions against your selected stations. "
         "Distribution shows each as a solid percentile band -- the "
         "spread of 35 annual window means, the same thing sigma "
-        "compares -- with a fainter dotted outline showing the fuller "
-        "range seen pentad by pentad across the window; coverage is "
-        "measured against that fainter one, not the solid band. "
-        "Departure shows each as a single line at its per-variable "
-        "departure, coloured by sigma band. The station window can sit "
-        "anywhere in the year, independent of the region's own window "
-        "above.",
+        "compares; Departure shows each as a single line at its "
+        "per-variable departure, coloured by sigma band. The station "
+        "window can sit anywhere in the year, independent of the "
+        "region's own window above.",
     "rm_display_mode":
         "Variable ranges draws each side -- region average conditions and "
         "station -- as its p5-95 percentile band. Capped at 3 stations, "
@@ -858,18 +855,6 @@ HINTS = {
         "orange/red by the published sigma-dissimilarity thresholds "
         "(Mahony et al. 2017); the stations' own lines stay in the same "
         "colours Variable ranges uses.",
-    "rm_show_range":
-        "Adds a fainter dotted ring per side showing the range of "
-        "conditions seen pentad by pentad across the window -- what "
-        "coverage measures against, not what sigma compares or what "
-        "orders the ranking. Off by default: on a long window this "
-        "pooled range is dominated by the seasonal cycle and can look "
-        "wide enough to overlap almost any station, suggesting a "
-        "similarity sigma does not support. When it's on, a station's "
-        "own segment of that ring is thickened and darkened wherever "
-        "the region reaches past it -- coverage under 1.0 for that "
-        "variable. With it off, coverage stays reported in the table "
-        "below either way; only the drawing of it disappears.",
     "rm_auto_select":
         "Runs the automatic search for the current location, reference "
         "period, window length and variables, and fills the station and "
@@ -1721,12 +1706,9 @@ def _pct_to_r(pct):
     return RADAR_HOLE + (RADAR_MAX - RADAR_HOLE) * pct / 100
 
 
-RADAR_SHOW_ALERTS = True
-
-
 def region_radar(variables, region_py, station_pentad, stations,
                  conus_scale, p_lo, p_hi, station_windows, y_lo, y_hi,
-                 show_range=False, height=520):
+                 height=520):
     """The percentile radar. One axis per variable, fixed order (the
     caller's `variables` order, not selection order, so it doesn't
     reshuffle between reruns). Radial scale is the CONUS percentile,
@@ -1742,60 +1724,32 @@ def region_radar(variables, region_py, station_pentad, stations,
     calendar pentads, each converted to a CONUS percentile through its
     own window's average (_avg_conus_percentile()).
 
-    Two bands per side, not one (CLAUDE.md, "region_radar()'s two
-    bands"). The PRIMARY one -- full colour, always drawn -- is built
-    from _annual_mean_sample(): 35 annual window means per variable, the
-    exact vector sigma_dissimilarity() compares, and what orders the
-    automatic search's ranking. A SECONDARY, fainter and thinner ring is
-    built from _coverage_band_sample() instead (the pooled pentad x year
-    values for continuous variables, the per-year mean of the per-pentad
-    rate for RATE_VARS -- the same axis coverage() itself uses): the
-    range of conditions actually seen across the window, pentad by
-    pentad. Real and worth showing, but drawn only when `show_range` is
-    True (off by default) -- not for legibility (three stations' worth
-    of dotted rings is busy but not unreadable) but because it answers a
-    different question than the primary ring does, and a wide pooled
-    band can visually suggest a similarity sigma does not support (seen
-    directly at Nebraska: the pooled dew-point band is 26.7 degrees wide,
-    January to December, and overlaps almost any station regardless of
-    fit, contradicting what sigma reports for the exact same pair) --
-    that should not be the first thing anyone sees. At a short window
-    the two constructions nearly coincide, which is why this never
-    surfaced at 60 days.
-
-    Alert segments are tied to `show_range` and drawn only when it is
-    True, since they mark against the SECONDARY ring specifically and
-    have nothing to anchor to otherwise. Drawn from coverage() itself,
-    called once per station: a variable with coverage 1.0 for that
-    station draws nothing, regardless of how either ring happens to
-    look; anything under 1.0 thickens and darkens that station's own
-    SECONDARY-ring segment at the affected axis -- the two ring edges on
-    either side of the vertex, redrawn at full colour and quadruple the
-    width, in place of a separately-drawn radial marker pointing at the
-    gap. One shape saying "something happens here" reads better than two
-    objects (a faint ring plus a bold marker elsewhere) the eye has to
-    pair up itself. Uses region_pct_range/station_pct_range (the
-    SECONDARY, _coverage_band_sample()-based positions coverage() itself
-    used for its verdict, not the primary interannual ones), so the
-    emphasis and that verdict can't disagree. Asymmetric by coverage()'s
-    own direction (region beyond station), so a station much wider than
-    the region gets no emphasis. Gated off entirely by RADAR_SHOW_ALERTS
-    on top of `show_range`. An axis where neither the region nor any
-    shown station varies at all on the PRIMARY (interannual) sample is
-    greyed (CLAUDE.md, "no meaningful variation ... on either side"). All
-    colours from THEMES/STATION_COLORS; nothing hard-coded."""
+    The band is built from _annual_mean_sample(): 35 annual window means
+    per variable, the exact vector sigma_dissimilarity() compares, and
+    what orders the automatic search's ranking -- not the pooled pentad
+    x year sample coverage() uses (CLAUDE.md, "region_radar()'s band"):
+    that one is dominated by the seasonal cycle on a long window (26.7
+    degrees wide for Nebraska's full-year dew point) and overlaps almost
+    any station regardless of fit, contradicting what sigma reports for
+    the exact same pair. A second, fainter ring at that pooled axis, plus
+    alert segments marking where coverage() falls under 1.0, were tried
+    and removed: busy with more than one station on screen, and the
+    alerts had no ring the eye was actually tracking to anchor to once
+    drawn faint. coverage() itself is unaffected by any of this -- still
+    computed the same way, just reported in the per-variable results
+    table now, not drawn here. An axis where neither the region nor any
+    shown station varies at all is greyed (CLAUDE.md, "no meaningful
+    variation ... on either side"). All colours from THEMES/
+    STATION_COLORS; nothing hard-coded."""
     n = len(variables)
     angles = [i * 360 / n for i in range(n)]
 
-    def pooled_pct(sample_fn, py, v, w_lo, w_hi):
-        lo, hi = np.percentile(sample_fn(py, v), [5, 95])
+    def pooled_pct(py, v, w_lo, w_hi):
+        lo, hi = np.percentile(_annual_mean_sample(py, v), [5, 95])
         return (_avg_conus_percentile(lo, v, conus_scale, w_lo, w_hi),
                 _avg_conus_percentile(hi, v, conus_scale, w_lo, w_hi))
 
-    # PRIMARY band: 35 annual window means, the vector sigma actually
-    # compares -- what a reader should judge fit from.
-    region_pct = {v: pooled_pct(_annual_mean_sample, region_py, v, p_lo, p_hi)
-                 for v in variables}
+    region_pct = {v: pooled_pct(region_py, v, p_lo, p_hi) for v in variables}
 
     station_py = {}
     for stn in stations:
@@ -1804,22 +1758,8 @@ def region_radar(variables, region_py, station_pentad, stations,
     station_pct = {}
     for stn in stations:
         s_lo, s_hi = station_windows[stn]
-        station_pct[stn] = {v: pooled_pct(_annual_mean_sample, station_py[stn], v, s_lo, s_hi)
+        station_pct[stn] = {v: pooled_pct(station_py[stn], v, s_lo, s_hi)
                             for v in variables}
-
-    # SECONDARY band: the pooled pentad x year sample coverage() itself
-    # uses -- the range of conditions across the window, real and worth
-    # showing, but not what fit should be judged from (see docstring).
-    # Computed only when show_range is on -- also spares a coverage()
-    # call per station further down when it is off.
-    if show_range:
-        region_pct_range = {v: pooled_pct(_coverage_band_sample, region_py, v, p_lo, p_hi)
-                            for v in variables}
-        station_pct_range = {}
-        for stn in stations:
-            s_lo, s_hi = station_windows[stn]
-            station_pct_range[stn] = {v: pooled_pct(_coverage_band_sample, station_py[stn], v, s_lo, s_hi)
-                                      for v in variables}
 
     greyed = set()
     for v in variables:
@@ -1868,92 +1808,6 @@ def region_radar(variables, region_py, station_pentad, stations,
             r=inner_s + [inner_s[0]], theta=theta_closed, mode="lines",
             line=dict(color=c, width=2, dash="dash"),
             name=stn, legendgroup=stn, showlegend=False, hoverinfo="skip"))
-
-    if show_range:
-        # SECONDARY band: faint, thin dotted outlines only (no fill -- a
-        # second filled shape at this opacity would compete with the
-        # primary band for attention, which is backwards) -- the range
-        # of conditions actually seen across the window, real but not
-        # what a reader should judge fit from (see docstring). No
-        # legend entries: explained once, in HINTS["rm_radar"], not
-        # doubled for every station here.
-        outer_range = [_pct_to_r(region_pct_range[v][1]) for v in variables]
-        inner_range = [_pct_to_r(region_pct_range[v][0]) for v in variables]
-        for r in (inner_range, outer_range):
-            fig.add_trace(go.Scatterpolar(
-                r=r + [r[0]], theta=theta_closed, mode="lines",
-                line=dict(color=_hex_to_rgba(T["accent"], 0.4), width=1, dash="dot"),
-                showlegend=False, hoverinfo="skip"))
-
-        for i, stn in enumerate(stations):
-            c = STATION_COLORS[i % len(STATION_COLORS)]
-            outer_r = [_pct_to_r(station_pct_range[stn][v][1]) for v in variables]
-            inner_r = [_pct_to_r(station_pct_range[stn][v][0]) for v in variables]
-            for r in (inner_r, outer_r):
-                fig.add_trace(go.Scatterpolar(
-                    r=r + [r[0]], theta=theta_closed, mode="lines",
-                    line=dict(color=_hex_to_rgba(c, 0.4), width=1, dash="dot"),
-                    showlegend=False, hoverinfo="skip"))
-
-    if RADAR_SHOW_ALERTS and show_range:
-        # Called once per station -- the ONLY source of truth for
-        # whether a variable draws an alert at all. A station whose
-        # ring merely looks like a good match (e.g. a wide band that
-        # happens to overlap the region visually) but whose coverage()
-        # is under 1.0 still gets a segment; one at exactly 1.0 never
-        # does, regardless of how the rings above happen to be drawn.
-        cov_by_stn = {
-            stn: coverage(region_py, station_pentad, stn, *station_windows[stn],
-                         y_lo, y_hi, variables)
-            for stn in stations
-        }
-        for i, v in enumerate(variables):
-            r5_pct, r95_pct = region_pct_range[v]
-            prev_i, next_i = (i - 1) % n, (i + 1) % n
-            for si, stn in enumerate(stations):
-                if cov_by_stn[stn][v] >= 1.0:
-                    continue
-                c = STATION_COLORS[si % len(STATION_COLORS)]
-                s5_pct, s95_pct = station_pct_range[stn][v]
-                # region reaches below the station's floor / above its
-                # ceiling -- region_pct_range/station_pct_range (the
-                # SECONDARY, _coverage_band_sample()-based ring, not the
-                # primary interannual one) are built from the same axis
-                # coverage() used above, so these gaps and that verdict
-                # can't disagree.
-                lo_gap = s5_pct - r5_pct
-                hi_gap = r95_pct - s95_pct
-                # Not a separate radial marker: redraw the station's own
-                # SECONDARY-ring edges on either side of this vertex, at
-                # full colour (vs. the ring's own 40%-opacity tint) and
-                # 4x the width, with a marker only at the vertex itself.
-                # The emphasis sits exactly on the ring's true position
-                # (station_pct_range, the same one coverage() used), so
-                # it reads as that ring itself saying "something happens
-                # here" rather than a second object pointing at it from
-                # elsewhere. Its length is the fixed angular span between
-                # neighbouring axes, not the gap's own size, so even a
-                # tiny gap still emphasises a clearly visible stretch of
-                # ring -- unlike the radial marker this replaced, there
-                # is no "too short to read" case left to floor.
-                if lo_gap > 0:
-                    prev_r = _pct_to_r(station_pct_range[stn][variables[prev_i]][0])
-                    next_r = _pct_to_r(station_pct_range[stn][variables[next_i]][0])
-                    fig.add_trace(go.Scatterpolar(
-                        r=[prev_r, _pct_to_r(s5_pct), next_r],
-                        theta=[angles[prev_i], angles[i], angles[next_i]],
-                        mode="lines+markers", line=dict(color=c, width=4),
-                        marker=dict(color=c, size=[0, 7, 0]),
-                        showlegend=False, hoverinfo="skip"))
-                if hi_gap > 0:
-                    prev_r = _pct_to_r(station_pct_range[stn][variables[prev_i]][1])
-                    next_r = _pct_to_r(station_pct_range[stn][variables[next_i]][1])
-                    fig.add_trace(go.Scatterpolar(
-                        r=[prev_r, _pct_to_r(s95_pct), next_r],
-                        theta=[angles[prev_i], angles[i], angles[next_i]],
-                        mode="lines+markers", line=dict(color=c, width=4),
-                        marker=dict(color=c, size=[0, 7, 0]),
-                        showlegend=False, hoverinfo="skip"))
 
     ticktext = [
         f'<span style="color:{T["muted"]}">{GRID_VARS[v]["label"]}</span>'
@@ -2894,15 +2748,6 @@ elif section == "Region Matching":
                                           "Departure": "Standardised difference"}[m],
                     key="rm_display_mode", help=HINTS["rm_display_mode"])
 
-                # Distribution only -- Departure has no secondary ring
-                # to show. Off by default: see HINTS/region_radar()'s
-                # own docstring for why the primary ring alone is the
-                # honest default, not a legibility call.
-                if st.session_state.rm_display_mode == "Distribution":
-                    st.session_state.setdefault("rm_show_range", False)
-                    st.checkbox("Show range across the window",
-                               key="rm_show_range", help=HINTS["rm_show_range"])
-
             with ctrl_stations, st.container(key="rm_ctrl_stations"):
                 if auto:
                     # options is auto_stations, not all_stations, so
@@ -3009,18 +2854,20 @@ elif section == "Region Matching":
             else:
                 sigma_by_stn = {}
                 width_by_stn = {}
+                cov_by_stn = {}
                 for stn in radar_stations:
                     s_lo, s_hi = station_windows[stn]
                     sigma_by_stn[stn] = sigma_dissimilarity(
                         region_py, station_pentad, stn, s_lo, s_hi, y_lo, y_hi, ordered_vars)
                     width_by_stn[stn] = width_ratio(
                         region_py, station_pentad, stn, s_lo, s_hi, y_lo, y_hi, ordered_vars)
+                    cov_by_stn[stn] = coverage(
+                        region_py, station_pentad, stn, s_lo, s_hi, y_lo, y_hi, ordered_vars)
 
                 if st.session_state.rm_display_mode == "Distribution":
                     fig = region_radar(ordered_vars, region_py, station_pentad,
                                        radar_stations, scale, p_lo, p_hi,
-                                       station_windows, y_lo, y_hi,
-                                       show_range=st.session_state.get("rm_show_range", False))
+                                       station_windows, y_lo, y_hi)
                 else:
                     fig = region_radar_departure(ordered_vars, region_py, station_pentad,
                                                radar_stations, station_windows, y_lo, y_hi)
@@ -3088,21 +2935,29 @@ elif section == "Region Matching":
                     # own interannual SD -- sigma_dissimilarity()'s own
                     # per-variable z, the exact number the Departure radar
                     # plots, so the table and that chart always agree --
-                    # and width_ratio(): the station's band width divided
-                    # by the region's, on the same _coverage_band_sample()
+                    # width_ratio(): the station's band width divided by
+                    # the region's, on the same _coverage_band_sample()
                     # axis coverage() and the radar's rings use. Coverage
                     # alone cannot tell a station that covers the region
                     # by sitting on top of it from one that covers it by
                     # being three times wider; this is the only place
-                    # that distinction is visible.
+                    # that distinction is visible -- and coverage()
+                    # itself, genuine MESS: the pooled fraction of the
+                    # region's values that fall inside the station's own
+                    # band, per variable. Not drawn on the radar (that
+                    # drawing read poorly with more than one station and
+                    # was removed); this table is the only place it is
+                    # reported at all now.
                     st.session_state.setdefault("rm_table_units", "Native units")
                     st.radio("Units",
-                            ["Native units", "Interannual SD units", "Width ratio"],
+                            ["Native units", "Interannual SD units",
+                             "Width ratio", "Coverage"],
                             key="rm_table_units", horizontal=True,
                             label_visibility="collapsed")
                     table_mode = st.session_state.rm_table_units
                     standardized = table_mode == "Interannual SD units"
                     width_mode = table_mode == "Width ratio"
+                    coverage_mode = table_mode == "Coverage"
 
                     def _station_col_header(stn):
                         # Automatic mode: the header itself carries that
@@ -3124,11 +2979,13 @@ elif section == "Region Matching":
                         kind = GRID_VARS[v]["kind"]
                         rate_scale = win_days if v in RATE_VARS else 1
                         var_label = GRID_VARS[v]["label"]
-                        rec = {"Variable": var_label if standardized or width_mode
+                        rec = {"Variable": var_label if standardized or width_mode or coverage_mode
                               else f"{var_label}{unit_suffix(kind, metric)}"}
                         for stn in radar_stations:
                             col = _station_col_header(stn)
-                            if width_mode:
+                            if coverage_mode:
+                                rec[col] = round(cov_by_stn[stn][v], 2)
+                            elif width_mode:
                                 wr = width_by_stn[stn][v]
                                 rec[col] = round(wr, 2) if not np.isnan(wr) else None
                             elif standardized:
@@ -3140,7 +2997,13 @@ elif section == "Region Matching":
                                 rec[col] = round(convert_delta(dep_raw, kind, metric), 2)
                         rows.append(rec)
                     st.dataframe(pd.DataFrame(rows), width=W, hide_index=True)
-                    if width_mode:
+                    if coverage_mode:
+                        st.caption("Share of the region's values that fall inside the "
+                                  "station's own band, per variable (genuine MESS) -- "
+                                  "asymmetric: a station much wider than the region "
+                                  "scores the same as a perfect match, which is what "
+                                  "the width ratio above is for.")
+                    elif width_mode:
                         st.caption("Station band width ÷ region band width. Above "
                                   "1 means the station covers partly by being wider "
                                   "than the region, not by sitting on it; below 1 "
