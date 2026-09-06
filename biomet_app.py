@@ -1215,19 +1215,41 @@ def climate_dissimilarity(region_py, station_pentad, station, conus_scale,
     return out
 
 
-def _window_year_totals(pentad_year, v):
-    """RATE_VARS (PRECTOTCORR, THI_ge_79) store a per-pentad RATE --
-    mean/day, fraction of days -- not a total. fraction*5 is the exact
-    day-count for that one pentad (an integer for a station, its own
-    single cell; a continuous area-blend equivalent for a region/state,
-    averaged across cells first); summed over the window's pentads for
-    a given year, it is the exact window total for that year, no
-    information lost relative to a genuinely daily series -- the
-    pentad's own 5-day grouping does not throw anything away, see
-    _pentad_range()'s sibling reasoning. Used to rebuild coverage()'s
-    band on the WINDOW-YEAR axis instead of the pooled pentad-year one:
-    one value per reference year, not one per pentad per year."""
-    return pentad_year.groupby("year")[v].apply(lambda s: (s * 5).sum()).to_numpy()
+def _coverage_band_sample(pentad_year, v):
+    """The sample a p5-p95 band is built from for one variable, shared
+    verbatim by coverage() and region_radar()'s own band/alert
+    positions -- calling this from both is what guarantees the radar's
+    red segments and the reported coverage number can never disagree;
+    two separately-written computations of "the same" axis is exactly
+    how they drifted apart before.
+
+    RATE_VARS (PRECTOTCORR, THI_ge_79) store a per-pentad RATE -- mean/
+    day, fraction of days -- not a total. Pooling 420 raw pentad-year
+    values (12 pentads x 35 reference years, say) treats each pentad as
+    an independent draw, and THI_ge_79's six possible levels (0/5 ...
+    5/5) then pack enough mass at 0 and 1 that the station's own p5-p95
+    routinely comes out as the full [0, 1] -- wide enough to swallow
+    almost any region value regardless of how different the two
+    climates actually are (CLAUDE.md, "coverage()'s band for
+    RATE_VARS"). Built here instead from the per-YEAR mean of the
+    per-pentad rate: one value per reference year, not one per pentad
+    per year. This is the same relative distribution as the window's
+    exact day-count total (fraction*5 summed over the window's pentads
+    that year) -- proportional to it by the constant 5 x n_pentads, a
+    positive linear rescale -- so coverage()'s own containment verdict
+    is identical either way; kept on the rate's own native scale (not
+    rescaled to a day-count total) specifically so region_radar() can
+    look it up directly against conus_scale's own per-pentad CONUS
+    distribution, built on that same native scale, with no separate
+    scale needed.
+
+    Every other variable keeps the pooled pentad x year sample: the
+    pentad is the right unit there, since averaging over 5 days filters
+    synoptic weather and leaves the climatic signal that actually
+    separates two places."""
+    if v in RATE_VARS:
+        return pentad_year.groupby("year")[v].mean().to_numpy()
+    return pentad_year[v].to_numpy()
 
 
 def coverage(region_py, station_pentad, station, p_lo, p_hi, y_lo, y_hi, variables):
@@ -1238,43 +1260,28 @@ def coverage(region_py, station_pentad, station, p_lo, p_hi, y_lo, y_hi, variabl
     region) scores the same as a perfect match. Per variable, the pooled
     fraction of the region's values that fall inside the station's own
     p5-p95 for the whole window. Feeds the radar's red segments
-    (region_radar()); a separate question from climate_dissimilarity(),
-    not a component of it, so it is not summed into a total here.
+    (region_radar()), called directly from there so the two can never
+    disagree; a separate question from climate_dissimilarity(), not a
+    component of it, so it is not summed into a total here.
 
-    Continuous variables (T2M, DTR, T2MDEW, ...) build that band from
-    the pooled pentad x year values, same as everywhere else in this
-    file: the pentad is the right unit there, since averaging over 5
-    days filters synoptic weather noise and leaves the climatic signal
-    that actually separates two places.
-
-    RATE_VARS do not: pooling 420 raw pentad-year fractions (12 pentads
-    x 35 reference years, say) treats each pentad as an independent
-    draw, which for THI_ge_79's six possible levels (0/5 ... 5/5) packs
-    enough mass at 0 and 1 that the station's own p5-p95 routinely comes
-    out as the full [0, 1] -- a band wide enough to swallow almost any
-    region value, regardless of how different the two climates actually
-    are. Diagnosed directly: BAHA, GOLD, PLYM and REID (NC's lowland
-    stations, 20-49 heat-stress days a year against Maine's near-zero)
-    all scored coverage 1.0 against Maine under the pooled axis. Fixed
-    by building the RATE_VARS band on the WINDOW-YEAR axis instead
-    (_window_year_totals(): one exact window total per reference year,
-    35 values, not 420) -- the same axis sigma_dissimilarity() already
-    uses for its own per-year mean, and the same total the results
-    table already scales RATE_VARS to for display. Under it, those same
-    four stations correctly drop to 0.0-0.83 against Maine; LAUR and
-    WAYN, the two mountain stations with genuinely low heat-stress
-    exposure, stay at 1.0 under both axes -- that agreement was real,
-    not an artefact of the fix."""
+    RATE_VARS build that band differently -- see _coverage_band_sample(),
+    shared verbatim with region_radar()'s own band/alert positions so
+    the two can never disagree. Diagnosed directly: BAHA, GOLD, PLYM and
+    REID (NC's lowland stations, 20-49 heat-stress days a year against
+    Maine's near-zero) all scored coverage 1.0 against Maine under the
+    pooled pentad-year axis, purely from THI_ge_79's own six-level
+    discretisation packing enough mass at 0 and 1 to already span the
+    full [0, 1]. Under the fixed per-year axis those same four stations
+    correctly drop to 0.0-0.83 against Maine; LAUR and WAYN, the two
+    mountain stations with genuinely low heat-stress exposure, stay at
+    1.0 under both axes -- that agreement was real, not an artefact of
+    the fix."""
     sta_py = station_pentad_year(station_pentad, station, p_lo, p_hi, y_lo, y_hi)
 
     out = {}
     for v in variables:
-        if v in RATE_VARS:
-            sta_vals = _window_year_totals(sta_py, v)
-            region_vals = _window_year_totals(region_py, v)
-        else:
-            sta_vals = sta_py[v].to_numpy()
-            region_vals = region_py[v].to_numpy()
+        sta_vals = _coverage_band_sample(sta_py, v)
+        region_vals = _coverage_band_sample(region_py, v)
 
         sta_p5, sta_p95 = np.percentile(sta_vals, [5, 95])
         out[v] = float(np.mean((region_vals >= sta_p5) & (region_vals <= sta_p95)))
@@ -1711,20 +1718,20 @@ def _pct_to_r(pct):
     return RADAR_HOLE + (RADAR_MAX - RADAR_HOLE) * pct / 100
 
 
-# Off for now: a real but tiny gap (well under 1-2 percentile points --
-# e.g. GOLD vs North Carolina on T2M/DTR/T2MDEW) draws as two overlapping
-# end-cap markers with no visible line between them, which reads as a
-# stray dot/error rather than "basically covered," on exactly the axes
-# where the station is a good match. Needs a minimum-gap threshold or a
-# different visual language (e.g. a thin tick instead of a thick capped
-# segment) before turning back on -- the geometry itself is correct
-# (verified against the raw coverage()/percentile numbers).
-RADAR_SHOW_ALERTS = False
+# A real but tiny gap (well under 1-2 percentile points -- e.g. GOLD vs
+# North Carolina on T2M/DTR/T2MDEW) would otherwise draw as two
+# overlapping end-cap markers with no visible line between them, which
+# reads as a stray dot/error rather than "basically covered," on
+# exactly the axes where the station is a good match. MIN_ALERT_GAP_PCT
+# floors the DRAWN length only, not the underlying verdict -- see the
+# alert-segment loop in region_radar().
+RADAR_SHOW_ALERTS = True
+MIN_ALERT_GAP_PCT = 2.0
 
 
 def region_radar(variables, region_py, station_pentad, stations,
                  conus_scale, p_lo, p_hi, station_windows, y_lo, y_hi,
-                 focus=None, height=520):
+                 height=520):
     """The percentile radar. One axis per variable, fixed order (the
     caller's `variables` order, not selection order, so it doesn't
     reshuffle between reruns). Radial scale is the CONUS percentile,
@@ -1738,25 +1745,34 @@ def region_radar(variables, region_py, station_pentad, stations,
     of the top 3 its own window rather than one shared position; a
     station's own window and `p_lo`-`p_hi` are frequently different
     calendar pentads, each converted to a CONUS percentile through its
-    own window's average (_avg_conus_percentile()), since a raw value
-    means a different thing in different months on each side
-    independently. Alert segments — thick, round-capped (faked with
-    matching end markers; Plotly line traces don't expose a cap style),
-    in the accent colour, both tails, driven by coverage()'s own
-    asymmetric direction (region beyond station) rather than
-    climate_dissimilarity()'s symmetric gap, so a station much wider than
-    the region draws no segment — are built but gated off by
-    RADAR_SHOW_ALERTS (see there for why: a real but tiny gap reads as a
-    stray dot, not an alert, on exactly the axes where a station is a
-    good match). An axis where neither the region nor any shown station
-    varies at all is greyed (CLAUDE.md, "no meaningful variation ... on
-    either side"). All colours from THEMES/STATION_COLORS; nothing
-    hard-coded."""
+    own window's average (_avg_conus_percentile()). Both rings are built
+    from _coverage_band_sample() -- the pooled pentad x year values for
+    continuous variables, the per-year mean of the per-pentad rate for
+    RATE_VARS -- the exact same helper coverage() itself calls, so the
+    ring position and the alert segments below can never be reading two
+    different axes for the same variable.
+
+    Alert segments — thick, round-capped (faked with matching end
+    markers; Plotly line traces don't expose a cap style), in each
+    shown station's own colour, both tails — are drawn from coverage()
+    itself, called once per station: a variable with coverage 1.0 for
+    that station draws nothing, regardless of how the two rings happen
+    to look; anything under 1.0 draws the true gap between the rings
+    (region_pct/station_pct, built from the same _coverage_band_sample()
+    axis coverage() used for its own verdict), floored to
+    MIN_ALERT_GAP_PCT so a real but tiny gap still reads as a mark, not
+    two overlapping end caps that look like a stray dot. Asymmetric by
+    coverage()'s own direction (region beyond station), so a station
+    much wider than the region draws no segment. Gated off entirely by
+    RADAR_SHOW_ALERTS. An axis where neither the region nor any shown
+    station varies at all is greyed (CLAUDE.md, "no meaningful variation
+    ... on either side"), using that same shared sample. All colours
+    from THEMES/STATION_COLORS; nothing hard-coded."""
     n = len(variables)
     angles = [i * 360 / n for i in range(n)]
 
     def pooled_pct(py, v, w_lo, w_hi):
-        lo, hi = np.percentile(py[v], [5, 95])
+        lo, hi = np.percentile(_coverage_band_sample(py, v), [5, 95])
         return (_avg_conus_percentile(lo, v, conus_scale, w_lo, w_hi),
                 _avg_conus_percentile(hi, v, conus_scale, w_lo, w_hi))
 
@@ -1773,8 +1789,8 @@ def region_radar(variables, region_py, station_pentad, stations,
 
     greyed = set()
     for v in variables:
-        region_flat = np.isclose(*np.percentile(region_py[v], [5, 95]))
-        stations_flat = all(np.isclose(*np.percentile(station_py[stn][v], [5, 95]))
+        region_flat = np.isclose(*np.percentile(_coverage_band_sample(region_py, v), [5, 95]))
+        stations_flat = all(np.isclose(*np.percentile(_coverage_band_sample(station_py[stn], v), [5, 95]))
                             for stn in stations) if stations else True
         if region_flat and stations_flat:
             greyed.add(v)
@@ -1819,19 +1835,51 @@ def region_radar(variables, region_py, station_pentad, stations,
             line=dict(color=c, width=2, dash="dash"),
             name=stn, legendgroup=stn, showlegend=False, hoverinfo="skip"))
 
-    if RADAR_SHOW_ALERTS and focus in station_pct:
+    if RADAR_SHOW_ALERTS:
+        # Called once per station -- the ONLY source of truth for
+        # whether a variable draws an alert at all. A station whose
+        # ring merely looks like a good match (e.g. a wide band that
+        # happens to overlap the region visually) but whose coverage()
+        # is under 1.0 still gets a segment; one at exactly 1.0 never
+        # does, regardless of how the rings above happen to be drawn.
+        cov_by_stn = {
+            stn: coverage(region_py, station_pentad, stn, *station_windows[stn],
+                         y_lo, y_hi, variables)
+            for stn in stations
+        }
         for i, v in enumerate(variables):
             r5_pct, r95_pct = region_pct[v]
-            s5_pct, s95_pct = station_pct[focus][v]
-            lo_gap = s5_pct - r5_pct     # region reaches below the station's floor
-            hi_gap = r95_pct - s95_pct   # region reaches above the station's ceiling
-            for gap, a, b in ((lo_gap, r5_pct, s5_pct), (hi_gap, s95_pct, r95_pct)):
-                if gap > 0:
-                    r_ab = [_pct_to_r(a), _pct_to_r(b)]
+            for si, stn in enumerate(stations):
+                if cov_by_stn[stn][v] >= 1.0:
+                    continue
+                c = STATION_COLORS[si % len(STATION_COLORS)]
+                s5_pct, s95_pct = station_pct[stn][v]
+                # region reaches below the station's floor / above its
+                # ceiling -- region_pct/station_pct are built from the
+                # same _coverage_band_sample() axis coverage() used
+                # above, so these gaps and that verdict can't disagree.
+                lo_gap = s5_pct - r5_pct
+                hi_gap = r95_pct - s95_pct
+                # Anchored at the station's own edge (a real boundary)
+                # and extended toward the region's tip, floored to
+                # MIN_ALERT_GAP_PCT so a real but tiny gap still reads
+                # as a mark rather than two overlapping end caps that
+                # look like a stray dot -- the floor changes only the
+                # DRAWN length, never whether a segment is drawn at all
+                # (that's coverage()'s own verdict, checked above).
+                if lo_gap > 0:
+                    a, b = s5_pct - max(lo_gap, MIN_ALERT_GAP_PCT), s5_pct
                     fig.add_trace(go.Scatterpolar(
-                        r=r_ab, theta=[angles[i], angles[i]], mode="lines+markers",
-                        line=dict(color=T["accent"], width=7),
-                        marker=dict(color=T["accent"], size=8, symbol="circle"),
+                        r=[_pct_to_r(a), _pct_to_r(b)], theta=[angles[i], angles[i]],
+                        mode="lines+markers", line=dict(color=c, width=7),
+                        marker=dict(color=c, size=8, symbol="circle"),
+                        showlegend=False, hoverinfo="skip"))
+                if hi_gap > 0:
+                    a, b = s95_pct, s95_pct + max(hi_gap, MIN_ALERT_GAP_PCT)
+                    fig.add_trace(go.Scatterpolar(
+                        r=[_pct_to_r(a), _pct_to_r(b)], theta=[angles[i], angles[i]],
+                        mode="lines+markers", line=dict(color=c, width=7),
+                        marker=dict(color=c, size=8, symbol="circle"),
                         showlegend=False, hoverinfo="skip"))
 
     ticktext = [
