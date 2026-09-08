@@ -1254,25 +1254,49 @@ def _circle_points(lat, lon, radius_km, n=72):
     return np.degrees(lat2), np.degrees(lon2)
 
 
-def zip_radius_map(cells, zip_lat, zip_lon, radius_km, matched_cells, height=460):
-    """Task D's ZIP + radius counterpart to region_map() -- reworked
-    (Task D follow-up) to be the SAME map, full CONUS, same backdrop and
-    same highlight styling, rather than a separately-zoomed local view:
-    the only thing that differs from region_map() is which cells count
-    as "selected" (inside the radius, instead of inside a region/state).
-    A first version zoomed to the local area (mercator + fitbounds, no
-    CONUS backdrop) and was rejected on sight -- the point of keeping
-    one consistent map is that switching Region <-> ZIP mode shouldn't
-    also change what kind of map the user is reading.
+def zip_radius_map(state_regions, cells, zip_lat=None, zip_lon=None, radius_km=None,
+                   matched_cells=None, height=460):
+    """Task D's ZIP + radius counterpart to region_map() -- now (second
+    follow-up) the literal same base map, region fills included, not
+    just the same point backdrop: all five USDA_REGION_COLORS fills at
+    full opacity (there is no "active region" to dim the others against
+    here, unlike region_map()'s own use of this same trace), every cell
+    muted grey on top, exactly region_map()'s own two base layers.
+    Switching Region <-> ZIP mode changes only which cells read as
+    selected, never what kind of map is on screen -- a first version
+    dropped the region fill entirely and was asked back.
 
-    Adds only the radius halo (_circle_points(), a spherical
-    destination-point circle using zip_radius.EARTH_RADIUS_KM so it
-    matches the exact radius cells were actually resolved against) and
-    an X at the ZIP centroid, both liked as-is from the first version
-    and kept unchanged. Draws even when matched_cells is empty, so a
-    zero-cell radius still shows exactly where the search looked and why
-    nothing was close enough, rather than an unexplained blank map."""
+    zip_lat/zip_lon/radius_km/matched_cells all default to None so this
+    renders the same base map with nothing else on it before a ZIP is
+    entered, or if one doesn't resolve -- the map itself is always drawn
+    in the same call, at the same place in the layout, rather than only
+    appearing once a search succeeds and disappearing/reappearing on
+    every keystroke or radius change.
+
+    When a ZIP has resolved: the radius circle is now a filled halo (a
+    closed ring, fill="toself", translucent T["accent"]) with a SOLID
+    outline rather than a dotted one, an explicit visible area rather
+    than only a thin line. The X centroid marker is unchanged. Cells
+    within the radius are highlighted in T["accent"], the same styling
+    region_map() gives its own selection -- drawn last so they sit above
+    both the halo fill and the muted backdrop. Draws the halo even when
+    matched_cells is empty, so a zero-cell radius still shows exactly
+    where the search looked and why nothing was close enough, rather
+    than an unexplained blank map."""
+    region_colors = dict(zip(REGIONS, T["region_colors"]))
+
     fig = go.Figure()
+
+    for reg in REGIONS:
+        sub = state_regions[state_regions["region"] == reg]
+        c = region_colors[reg]
+        fig.add_trace(go.Choropleth(
+            locations=[STATE_ABBR[s] for s in sub["state"]],
+            z=[1] * len(sub), locationmode="USA-states",
+            colorscale=[[0, c], [1, c]], showscale=False,
+            marker_line_color=T["line"], marker_line_width=.75,
+            text=sub["state"], hovertemplate="%{text}<extra></extra>",
+            name=reg, showlegend=False))
 
     # every cell, muted -- identical to region_map()'s own backdrop
     fig.add_trace(go.Scattergeo(
@@ -1280,27 +1304,29 @@ def zip_radius_map(cells, zip_lat, zip_lon, radius_km, matched_cells, height=460
         marker=dict(size=3, color=T["text"], opacity=.6),
         hoverinfo="skip", showlegend=False))
 
-    circle_lat, circle_lon = _circle_points(zip_lat, zip_lon, radius_km)
-    fig.add_trace(go.Scattergeo(
-        lat=circle_lat, lon=circle_lon, mode="lines",
-        line=dict(color=T["accent"], width=1.5, dash="dot"),
-        hoverinfo="skip", showlegend=False))
-
-    fig.add_trace(go.Scattergeo(
-        lat=[zip_lat], lon=[zip_lon], mode="markers",
-        marker=dict(size=9, symbol="x", color=T["text"]),
-        hoverinfo="skip", showlegend=False))
-
-    # the cells within the radius highlighted -- identical styling to
-    # region_map()'s own selection highlight, just a different rule for
-    # which cells qualify (within radius_km, instead of within a region
-    # or a chosen set of states).
-    if len(matched_cells):
+    if zip_lat is not None and zip_lon is not None and radius_km is not None:
+        circle_lat, circle_lon = _circle_points(zip_lat, zip_lon, radius_km)
         fig.add_trace(go.Scattergeo(
-            lon=matched_cells["lon"], lat=matched_cells["lat"], mode="markers",
-            marker=dict(size=4.5, color=T["accent"],
-                        line=dict(color=T["bg"], width=.5)),
+            lat=circle_lat, lon=circle_lon, mode="lines",
+            line=dict(color=T["accent"], width=1.5),
+            fill="toself", fillcolor=_hex_to_rgba(T["accent"], 0.15),
             hoverinfo="skip", showlegend=False))
+
+        fig.add_trace(go.Scattergeo(
+            lat=[zip_lat], lon=[zip_lon], mode="markers",
+            marker=dict(size=9, symbol="x", color=T["text"]),
+            hoverinfo="skip", showlegend=False))
+
+        # the cells within the radius highlighted -- identical styling to
+        # region_map()'s own selection highlight, just a different rule
+        # for which cells qualify (within radius_km, instead of within a
+        # region or a chosen set of states).
+        if matched_cells is not None and len(matched_cells):
+            fig.add_trace(go.Scattergeo(
+                lon=matched_cells["lon"], lat=matched_cells["lat"], mode="markers",
+                marker=dict(size=4.5, color=T["accent"],
+                            line=dict(color=T["bg"], width=.5)),
+                hoverinfo="skip", showlegend=False))
 
     fig.update_geos(scope="usa", bgcolor="rgba(0,0,0,0)")
     fig.update_layout(height=height, margin=dict(l=0, r=0, t=0, b=0),
@@ -3155,10 +3181,21 @@ elif section == "Region Matching":
                             f"{rm_zip_report['message']} {rm_zip_report['n_cells']} "
                             f"grid cell{'s' if rm_zip_report['n_cells'] != 1 else ''} "
                             f"across {n_states} state{'s' if n_states != 1 else ''}.")
+
+                # The map itself is always drawn, here, once, regardless of
+                # whether a ZIP has resolved yet -- zip_radius_map()'s own
+                # zip_lat/zip_lon/radius_km/matched_cells default to None
+                # and just draw the base map without them, rather than the
+                # chart appearing and disappearing on every keystroke or
+                # invalid entry.
+                if rm_zip_report is not None:
                     st.plotly_chart(
-                        zip_radius_map(grid, rm_zip_report["lat"], rm_zip_report["lon"],
-                                       rm_zip_radius, rm_zip_cells),
+                        zip_radius_map(state_regions, grid, rm_zip_report["lat"],
+                                       rm_zip_report["lon"], rm_zip_radius, rm_zip_cells),
                         width=W, config={"displayModeBar": False})
+                else:
+                    st.plotly_chart(zip_radius_map(state_regions, grid),
+                                    width=W, config={"displayModeBar": False})
 
         with st.container(key="rm_block_window_vars"), \
              st.expander("2. Select the time exploration window and "
