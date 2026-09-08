@@ -357,6 +357,17 @@ def inject_css(t):
       .st-key-rm_auto_table {{
           padding-top:8px; }}
 
+      /* Station reach's window-length control (segmented_control) next
+         to the time-window and variable selectboxes: BaseWeb renders a
+         segmented control shorter than a selectbox's own input box, so
+         the row started level with the other two but didn't match their
+         height. Stretched to a selectbox's typical height so all three
+         controls read as one row, not two different widget styles.
+         Best effort, unverified in a browser this session. */
+      .st-key-reach_length_ctrl div[data-testid="stSegmentedControl"],
+      .st-key-reach_length_ctrl div[data-testid="stSegmentedControl"] label {{
+          min-height:2.5rem; }}
+
       /* Units and Theme, pinned top-left just outside the sidebar (300px
          is Streamlit's default sidebar width; if the sidebar is dragged
          to a different width, or collapsed, this stops lining up with its
@@ -1204,7 +1215,11 @@ def station_reach_map(cell_sigma, cell_geojson, cell_window_label, height=560):
         showscale=False, marker_line_color=T["line"], marker_line_width=1,
         hoverinfo="skip", showlegend=False))
 
-    fig.update_geos(scope="usa", bgcolor="rgba(0,0,0,0)")
+    # Domain shifted right of the legend's own column (x=0.01), the same
+    # "free up the left margin for the legend" move region_radar() already
+    # documents for its polar domain -- without it the legend sits flush
+    # against the map's own left edge instead of beside it.
+    fig.update_geos(scope="usa", bgcolor="rgba(0,0,0,0)", domain=dict(x=[0.08, 1], y=[0, 1]))
     fig.update_layout(
         height=height, margin=dict(l=0, r=0, t=0, b=0),
         paper_bgcolor="rgba(0,0,0,0)", font=dict(color=T["text"]),
@@ -2780,7 +2795,12 @@ elif section == "Region Matching":
             "reach_window", rw.CANDIDATES_BY_LENGTH[st.session_state.reach_length][0])
 
         length_col, window_col, var_col = st.columns(3)
-        with length_col:
+        with length_col, st.container(key="reach_length_ctrl"):
+            # min-height CSS on this container (inject_css()) stretches
+            # the segmented control to a selectbox's own height -- BaseWeb
+            # renders one shorter than the other by default, which left
+            # this column starting level with window_col/var_col but not
+            # matching their height.
             st.segmented_control(
                 "Window length", RM_REACH_LENGTHS, key="reach_length",
                 format_func=lambda k: RM_REACH_LENGTH_LABELS[k],
@@ -2789,18 +2809,13 @@ elif section == "Region Matching":
         is_annual = st.session_state.reach_length == "12mo"
         window_candidates = rw.CANDIDATES_BY_LENGTH[st.session_state.reach_length]
         with window_col:
-            # The selectbox carries its own visible label ("Time window")
-            # rather than a separate st.caption above the row: a caption
-            # and a widget's native label render at different heights, so
-            # the row started lower than length_col's/var_col's own
-            # widget-labelled controls. The buttons have no label of
-            # their own to match that height with, so an empty
-            # st.write("") stands in for one -- same fix, the same
-            # "nothing above the button" gap that would otherwise leave
-            # them sitting higher than the dropdown beside them.
-            prev_col, dd_col, next_col = st.columns([1, 4, 1])
+            # vertical_alignment="bottom": the step buttons have no label
+            # above them the way the selectbox does, so top-aligning left
+            # them sitting higher than the dropdown's own input box.
+            # Bottom-aligning puts both buttons flush with the box itself
+            # instead.
+            prev_col, dd_col, next_col = st.columns([1, 4, 1], vertical_alignment="bottom")
             with prev_col:
-                st.write("")
                 st.button("◀", key="reach_window_prev", disabled=is_annual,
                          on_click=_step_reach_window, args=(-1,))
             with dd_col:
@@ -2809,7 +2824,6 @@ elif section == "Region Matching":
                     format_func=lambda k: rw.DISPLAY_LABEL[k],
                     disabled=is_annual, help=HINTS["rm_reach_window"])
             with next_col:
-                st.write("")
                 st.button("▶", key="reach_window_next", disabled=is_annual,
                          on_click=_step_reach_window, args=(1,))
 
