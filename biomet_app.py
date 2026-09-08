@@ -20,6 +20,8 @@ from plotly.subplots import make_subplots
 import streamlit as st
 from scipy.stats import chi, norm
 
+import region_windows as rw
+
 # ---------------------------------------------------------------- config ----
 
 DATA_PATH = Path(__file__).parent / "ECONET_HSdata_d.csv"
@@ -27,6 +29,7 @@ COUNTIES_PATH = Path(__file__).parent / "nc_counties.geojson"
 STATE_PENTAD_PATH = Path(__file__).parent / "state_pentad.parquet"
 CONUS_GRID_PATH = Path(__file__).parent / "conus_grid.parquet"
 STATION_PENTAD_PATH = Path(__file__).parent / "station_pentad.parquet"
+STATION_REACH_PATH = Path(__file__).parent / "station_reach.parquet"
 
 APP_TITLE = "Biometeorological Data Explorer"
 BASE_YEARS = (2006, 2025)      # fixed anomaly reference, never follows the filter
@@ -518,6 +521,19 @@ def load_station_pentad(path):
     return pd.read_parquet(path)
 
 
+@st.cache_data(show_spinner="Loading station reach")
+def load_station_reach(path):
+    """The Station reach tab's only input: one row per grid cell x
+    station x region window, the composite sigma dissimilarity of that
+    single cell's own climate against the station, plus which candidate
+    station window won it (station_window — not shown in this tab, kept
+    for a later per-variable view; see precompute_station_reach.py).
+    Precomputed offline (Task N); nothing in this file computes sigma
+    per cell at request time the way sigma_dissimilarity() does for a
+    whole region in Advanced search."""
+    return pd.read_parquet(path)
+
+
 def aggregate(frame, var, by):
     """Aggregate honouring each variable's rule: totals sum, the rest average."""
     grouped = frame.groupby(by, observed=True)[var]
@@ -810,6 +826,20 @@ def nc_map(active, height=330):
 # that directly instead. One dict either way, in the same spirit as
 # THEMES and VARS. No em dashes: this is UI text, not code comments.
 HINTS = {
+    "rm_reach_block":
+        "How far this station's climate reaches: every grid cell coloured "
+        "by how many station-interannual standard deviations its own "
+        "typical conditions sit from the station's, over the six default "
+        "variables together (composite sigma dissimilarity, Mahony et al. "
+        "2017). Fixed variable set -- Advanced search lets you change it "
+        "and see each variable on its own.",
+    "rm_reach_window":
+        "Annual, or a fixed 3/6/9-month window starting at a quarter "
+        "boundary. For each cell, the station's own matching window is "
+        "searched over the four quarter starts of the same length and "
+        "the best (lowest-sigma) one is used automatically -- which one "
+        "won is not shown here; see Advanced search to compare specific "
+        "windows by hand.",
     "rm_reference_period":
         "Select the period over which the biometeorological statistics "
         "are calculated.",
@@ -1019,6 +1049,38 @@ def region_map(state_regions, cells, active_region, active_states, height=460):
     fig.update_geos(scope="usa", bgcolor="rgba(0,0,0,0)")
     fig.update_layout(height=height, margin=dict(l=0, r=0, t=0, b=0),
                       paper_bgcolor="rgba(0,0,0,0)", showlegend=False)
+    return fig
+
+
+def station_reach_map(cell_sigma, height=520):
+    """Every grid cell, coloured by its own composite sigma dissimilarity
+    against one station in one window (station_reach.parquet, already
+    filtered to that one station/window before this is called). Same
+    scope="usa" / transparent-paper convention as region_map(); unlike
+    that map this has no state fill or selection to layer, just the
+    2863 cells themselves as the whole story, so one Scattergeo trace is
+    enough. Colour bands, not a gradient (sigma_stepped_colorscale()) --
+    the same published-threshold reasoning SIGMA_BANDS and the Departure
+    radar's radial background already use, now on a continuous colour
+    axis instead of discrete rings."""
+    fig = go.Figure(go.Scattergeo(
+        lon=cell_sigma["lon"], lat=cell_sigma["lat"], mode="markers",
+        marker=dict(
+            size=5, color=cell_sigma["sigma"],
+            colorscale=sigma_stepped_colorscale(), cmin=0, cmax=STATION_REACH_ZMAX,
+            colorbar=dict(
+                title="σ", thickness=14,
+                tickvals=[0, 2, 3, 4, STATION_REACH_ZMAX],
+                ticktext=["0", "2σ", "3σ", "4σ", f"{STATION_REACH_ZMAX:g}+"]),
+        ),
+        text=[f"{s:.2f}σ" if np.isfinite(s) else "extremely novel (off scale)"
+             for s in cell_sigma["sigma"]],
+        hovertemplate="%{text}<extra></extra>"))
+
+    fig.update_geos(scope="usa", bgcolor="rgba(0,0,0,0)")
+    fig.update_layout(height=height, margin=dict(l=0, r=0, t=0, b=0),
+                      paper_bgcolor="rgba(0,0,0,0)", showlegend=False,
+                      font=dict(color=T["text"]))
     return fig
 
 
@@ -1873,6 +1935,38 @@ SIGMA_BANDS = [
     (float("inf"), "#C62828"),  # 4+ sigma: "extremely novel"
 ]
 
+# The Station reach map's colour-scale ceiling. Only affects where the
+# 0-1 normalised scale SIGMA_BANDS' stops get placed on, not the colours
+# themselves -- the top band is flat red from 4 sigma to this ceiling and
+# beyond (Plotly clips marker colours past cmax to the end colour), so
+# any value clearly above 4 works; 6 is just a clean round one. A single
+# extreme cell can and does exceed it (precompute_station_reach.py found
+# one: a chi.sf underflow to exactly 0.0 giving norm.isf(0) = inf, the
+# same float64-near-zero edge case sigma_dissimilarity()'s own docstring
+# already flags for the opposite tail) -- that reads as the same solid
+# red as any other very poor match, which is the correct reading of it.
+STATION_REACH_ZMAX = 6.0
+
+
+def sigma_stepped_colorscale(zmax=STATION_REACH_ZMAX):
+    """A Plotly colorscale (list of [0-1 position, colour] stops) that
+    reproduces SIGMA_BANDS' own green/yellow/orange/red bands as hard
+    edges at 2 and 4 sigma, not a gradient between them -- the station
+    reach map is a continuous Plotly colour axis rather than the radar's
+    discrete rings, but the same "papers report bands, not a gradient"
+    reasoning above still applies, so the map should look like the same
+    four bands, not invent a fifth kind of visual language for them."""
+    stops = []
+    lo = 0.0
+    for threshold, color in SIGMA_BANDS:
+        hi = 1.0 if threshold == float("inf") else min(threshold / zmax, 1.0)
+        stops.append([lo, color])
+        stops.append([hi, color])
+        lo = hi
+        if hi >= 1.0:
+            break
+    return stops
+
 
 def sigma_band_color(sigma):
     """The published-threshold colour (SIGMA_BANDS) a sigma dissimilarity
@@ -2484,559 +2578,595 @@ elif section == "Region Matching":
     # frame can't, over its own pre-aggregated input. See CLAUDE.md, "The
     # Region matching section", for the full block-by-block design.
     if (not STATE_PENTAD_PATH.exists() or not CONUS_GRID_PATH.exists()
-            or not STATION_PENTAD_PATH.exists()):
-        st.error("state_pentad.parquet, conus_grid.parquet and/or "
-                 "station_pentad.parquet not found next to this script. "
-                 "See CLAUDE.md's R preprocessing section for how they're "
+            or not STATION_PENTAD_PATH.exists() or not STATION_REACH_PATH.exists()):
+        st.error("state_pentad.parquet, conus_grid.parquet, "
+                 "station_pentad.parquet and/or station_reach.parquet not "
+                 "found next to this script. See CLAUDE.md's R preprocessing "
+                 "section (and precompute_station_reach.py) for how they're "
                  "built.")
         st.stop()
 
     state_pentad = load_state_pentad(STATE_PENTAD_PATH)
     grid = load_conus_grid(CONUS_GRID_PATH)
     station_pentad = load_station_pentad(STATION_PENTAD_PATH)
+    station_reach = load_station_reach(STATION_REACH_PATH)
     state_regions = grid.drop_duplicates("state")[["state", "region"]]
     state_weights = grid.groupby("state")["area_weight"].sum()
 
-    with st.container(key="rm_block_reference"), \
-         st.expander("1. Reference period and data source", expanded=True):
-        ref_col, source_col = st.columns(2)
+    # Station reach is the landing view (st.tabs always opens on the
+    # first tab) -- it answers "how far does this station's climate
+    # reach", the inverse of Advanced search's "which station matches
+    # this region". Advanced search is everything blocks 1-6 already
+    # did before Task N; unchanged below, just moved one indent level
+    # in, under its own tab.
+    tab_reach, tab_advanced = st.tabs(["Station reach", "Advanced search"])
 
-        with ref_col, st.container(key="rm_ref_col"):
-            st.caption(HINTS["rm_reference_period"])
-            rm_ref_years = st.slider("Years", 1991, 2025, (1991, 2025),
-                                     key="rm_ref_years")
-            if rm_ref_years[1] - rm_ref_years[0] + 1 < 20:
-                st.warning("Under 20 years, the interannual variability "
-                          "diagnostic (block 5) stops meaning much.")
+    with tab_reach:
+        st.caption(HINTS["rm_reach_block"])
 
-        with source_col, st.container(key="rm_source_col"):
-            st.caption(HINTS["rm_station_source_block"])
-            rm_source = st.radio(
-                "NC stations data source", ["MERRA-2 (recommended)", "ECONet"],
-                key="rm_source", horizontal=True, label_visibility="collapsed",
-                help=HINTS["rm_station_source_control"])
-            if rm_source == "ECONet" and rm_ref_years[0] < 2006:
-                st.warning("ECONet station records only go back to 2006. Move "
-                          "the reference period's start year to 2006 or later, "
-                          "or switch back to MERRA-2.")
+        reach_stations = sorted(station_reach["station"].unique())
+        reach_col, window_col = st.columns(2)
+        with reach_col:
+            reach_station = st.selectbox("Station", reach_stations, key="reach_station")
+        with window_col:
+            reach_window = st.selectbox(
+                "Window", rw.WINDOW_KEYS, key="reach_window",
+                format_func=lambda k: rw.DISPLAY_LABEL[k],
+                help=HINTS["rm_reach_window"])
 
-    with st.container(key="rm_block_window"), \
-         st.expander("2. Time window exploration", expanded=True):
-        st.caption(HINTS["rm_window_block"])
-
-        st.session_state.setdefault("rm_window_mode", "Subannual")
-        st.radio("Coverage", ["Annual", "Subannual"], key="rm_window_mode",
-                 horizontal=True, on_change=_set_rm_window_annual)
-        is_annual = st.session_state.rm_window_mode == "Annual"
-
-        # No value= here: _set_rm_window_annual() writes rm_window's
-        # session_state directly on toggle, and Streamlit warns (a real
-        # policy check, not just style) if a keyed widget gets both an
-        # explicit value and a pre-existing session_state entry. setdefault
-        # supplies the one-time initial value instead, same as months_sel
-        # and trend_rate_control's key do it elsewhere in this file.
-        st.session_state.setdefault(
-            "rm_window", (date(2001, 6, 1), date(2001, 7, 30)))
-        rm_window = st.slider(
-            "Window", min_value=date(2001, 1, 1), max_value=date(2001, 12, 31),
-            step=timedelta(days=10), format="MMM D",
-            key="rm_window", label_visibility="collapsed",
-            disabled=is_annual, help=HINTS["rm_window_control"])
-        if is_annual:
-            rm_window = (date(2001, 1, 1), date(2001, 12, 31))
-        month_scale()
-
-        win_days = (rm_window[1] - rm_window[0]).days + 1
-        if win_days < 28:
-            st.warning("Window is under a month. About 30 days is the "
-                      "shortest supported.")
-
-    with st.container(key="rm_block_variables"), \
-         st.expander("3. Variables", expanded=True):
-        st.caption(HINTS["rm_variables"])
-
-        # A multiselect, not a checkbox row: consistent with how every
-        # other section in this app (ts_stations, anom_stations,
-        # data_stations) already lets the user pick a subset from a
-        # named list, and 8 options read tighter as one dropdown than as
-        # 8 boxes at this column width.
-        default_vars = [v for v, m in GRID_VARS.items() if m["default"]]
-        rm_vars = st.multiselect(
-            "Variables", list(GRID_VARS), default=default_vars,
-            format_func=lambda v: GRID_VARS[v]["label"], key="rm_vars")
-        if len(rm_vars) < 3:
-            st.warning("Fewer than three variables selected. The "
-                      "comparison degenerates below that.")
-
-    with st.container(key="rm_block_map"), \
-         st.expander("4. Region and states", expanded=True):
-        st.caption(HINTS["rm_map_block"])
-
-        st.session_state.setdefault("rm_region", REGIONS[0])
-        rm_region = st.segmented_control("Region", REGIONS, key="rm_region")
-
-        region_states = sorted(
-            state_regions.loc[state_regions["region"] == rm_region, "state"])
-        # setdefault(), not default=: the Select all/Clear all buttons
-        # below write this same key via a callback, and Streamlit warns
-        # if a widget gets both an explicit default= and a session_state
-        # write in its history -- setdefault() supplies the one-time
-        # initial value instead, same pattern rm_window/months_sel use.
-        st.session_state.setdefault(f"rm_states_{rm_region}", region_states)
-        st.multiselect("States", region_states,
-                       key=f"rm_states_{rm_region}",
-                       help=HINTS["rm_map_states"])
-
-        btn_all, btn_clear = st.columns(2)
-        btn_all.button("Select all", key=f"rm_states_all_{rm_region}", width=W,
-                      on_click=_set_state_selection,
-                      args=(f"rm_states_{rm_region}", region_states))
-        btn_clear.button("Clear all", key=f"rm_states_clear_{rm_region}", width=W,
-                         on_click=_set_state_selection,
-                         args=(f"rm_states_{rm_region}", []))
-
-        rm_states = st.session_state.get(f"rm_states_{rm_region}") or []
-
-        if rm_states:
-            n_cells = len(grid[grid["state"].isin(rm_states)])
-            sel_label = f"{len(rm_states)} state{'s' if len(rm_states) != 1 else ''} selected"
-        else:
-            n_cells = len(grid[grid["region"] == rm_region])
-            sel_label = f"{rm_region} (all {len(region_states)} states)"
-        st.caption(f"{sel_label} · {n_cells:,} grid cells")
-
-        st.plotly_chart(region_map(state_regions, grid, rm_region, rm_states),
+        cell_sigma = station_reach[
+            (station_reach["station"] == reach_station)
+            & (station_reach["window"] == reach_window)
+        ]
+        n_offscale = int((cell_sigma["sigma"] > STATION_REACH_ZMAX).sum())
+        st.plotly_chart(station_reach_map(cell_sigma),
                         width=W, config={"displayModeBar": False})
+        if n_offscale:
+            st.caption(f"{n_offscale} of {len(cell_sigma)} cells score above "
+                      f"{STATION_REACH_ZMAX:g}σ and show as the same solid red "
+                      "as the top of the scale.")
 
-    with st.container(key="rm_block_radar"), \
-         st.expander("5. Radar and station selection", expanded=True):
-        st.caption(HINTS["rm_radar"])
+    with tab_advanced:
+        with st.container(key="rm_block_reference"), \
+             st.expander("1. Reference period and data source", expanded=True):
+            ref_col, source_col = st.columns(2)
 
-        if rm_source == "ECONet":
-            st.warning("The station profile below always uses the grid "
-                      "cell (MERRA-2), regardless of this setting. An "
-                      "ECONet-measurements pentad aggregation does not "
-                      "exist yet.")
+            with ref_col, st.container(key="rm_ref_col"):
+                st.caption(HINTS["rm_reference_period"])
+                rm_ref_years = st.slider("Years", 1991, 2025, (1991, 2025),
+                                         key="rm_ref_years")
+                if rm_ref_years[1] - rm_ref_years[0] + 1 < 20:
+                    st.warning("Under 20 years, the interannual variability "
+                              "diagnostic (block 5) stops meaning much.")
 
-        if len(rm_vars) == 0:
-            st.info("Select at least one variable in block 3 to see the radar.")
-        else:
-            p_lo = pentad_of_doy(rm_window[0].timetuple().tm_yday)
-            p_hi = pentad_of_doy(rm_window[1].timetuple().tm_yday)
-            y_lo, y_hi = rm_ref_years
-            selected_states = rm_states if rm_states else region_states
-            all_stations = sorted(station_pentad["station"].unique())
-            # Fixed order every render: the caller's declared GRID_VARS order,
-            # not multiselect selection order, which can reshuffle on rerun.
-            ordered_vars = [v for v in GRID_VARS if v in rm_vars]
-            # The station window always matches the region window's LENGTH,
-            # not its position -- the slider below only translates.
-            win_pentads = p_hi - p_lo + 1
+            with source_col, st.container(key="rm_source_col"):
+                st.caption(HINTS["rm_station_source_block"])
+                rm_source = st.radio(
+                    "NC stations data source", ["MERRA-2 (recommended)", "ECONet"],
+                    key="rm_source", horizontal=True, label_visibility="collapsed",
+                    help=HINTS["rm_station_source_control"])
+                if rm_source == "ECONet" and rm_ref_years[0] < 2006:
+                    st.warning("ECONet station records only go back to 2006. Move "
+                              "the reference period's start year to 2006 or later, "
+                              "or switch back to MERRA-2.")
 
-            region_py = region_pentad_year(state_pentad, state_weights,
-                                           selected_states, p_lo, p_hi,
-                                           y_lo, y_hi, ordered_vars)
-            scale = conus_percentile_scale(y_lo, y_hi)
+        with st.container(key="rm_block_window"), \
+             st.expander("2. Time window exploration", expanded=True):
+            st.caption(HINTS["rm_window_block"])
 
-            st.session_state.setdefault("rm_radar_stations", [all_stations[0]])
-            st.session_state.setdefault("rm_auto_select", False)
-            st.session_state.setdefault("rm_display_mode", "Distribution")
+            st.session_state.setdefault("rm_window_mode", "Subannual")
+            st.radio("Coverage", ["Annual", "Subannual"], key="rm_window_mode",
+                     horizontal=True, on_change=_set_rm_window_annual)
+            is_annual = st.session_state.rm_window_mode == "Annual"
 
-            # The station window's default must keep tracking the region's
-            # own window (position AND length -- either can change above)
-            # whenever it moves, not just on first ever visit: a plain
-            # setdefault() only fires once per session and never re-syncs,
-            # which is what "only slides from January 1" turned out to be
-            # -- whatever position the region window happened to be at the
-            # FIRST time this control was ever drawn (pentad 1, if that
-            # first visit was in Annual mode) stuck permanently, however
-            # often the window above changed afterwards.
-            gap_days = win_pentads * 5
-            # SEARCH_STARTS is odd pentads only (1, 3, ..., 71); p_lo lands
-            # there automatically whenever the region window was reached by
-            # actually dragging its own slider (a 10-real-day step from
-            # Jan 1 always produces an odd pentad), but is not guaranteed
-            # to for an arbitrary p_lo in general -- and select_slider()
-            # silently resets to its FIRST option if ever handed a default
-            # outside its declared `options`, rather than erroring, so an
-            # even p_lo would otherwise snap the station window's default
-            # to Jan 1 without any visible sign why. Floor to the nearest
-            # odd pentad rather than assume.
-            snapped_p_lo = p_lo if p_lo % 2 == 1 else p_lo - 1
-            region_sig = (snapped_p_lo, gap_days)
-            if st.session_state.get("_rm_station_window_region_sig") != region_sig:
-                st.session_state.rm_station_window_start = snapped_p_lo
-                st.session_state["_rm_station_window_region_sig"] = region_sig
-            elif "rm_station_window_start" not in st.session_state:
-                # Region unchanged, but Streamlit prunes a widget's own
-                # session_state once it stops being rendered for a run --
-                # automatic mode hides this control entirely, so a full
-                # auto-on/auto-off cycle silently drops it and a bare
-                # select_slider() with no existing value to read would
-                # otherwise reset quietly to its first option (pentad 1)
-                # instead of where the user actually left it. Restore from
-                # a shadow key that isn't itself a widget's key and so is
-                # never pruned.
-                st.session_state.rm_station_window_start = st.session_state.get(
-                    "_rm_station_window_backup", p_lo)
+            # No value= here: _set_rm_window_annual() writes rm_window's
+            # session_state directly on toggle, and Streamlit warns (a real
+            # policy check, not just style) if a keyed widget gets both an
+            # explicit value and a pre-existing session_state entry. setdefault
+            # supplies the one-time initial value instead, same as months_sel
+            # and trend_rate_control's key do it elsewhere in this file.
+            st.session_state.setdefault(
+                "rm_window", (date(2001, 6, 1), date(2001, 7, 30)))
+            rm_window = st.slider(
+                "Window", min_value=date(2001, 1, 1), max_value=date(2001, 12, 31),
+                step=timedelta(days=10), format="MMM D",
+                key="rm_window", label_visibility="collapsed",
+                disabled=is_annual, help=HINTS["rm_window_control"])
+            if is_annual:
+                rm_window = (date(2001, 1, 1), date(2001, 12, 31))
+            month_scale()
 
-            # Mirror the live value into that same shadow key whenever it
-            # exists, so the NEXT hide/show cycle restores the actual last
-            # position rather than a stale pre-hide one.
-            if "rm_station_window_start" in st.session_state:
-                st.session_state["_rm_station_window_backup"] = \
-                    st.session_state.rm_station_window_start
+            win_days = (rm_window[1] - rm_window[0]).days + 1
+            if win_days < 28:
+                st.warning("Window is under a month. About 30 days is the "
+                          "shortest supported.")
 
-            auto = st.session_state.rm_auto_select
-            cap = 3 if st.session_state.rm_display_mode == "Distribution" else None
+        with st.container(key="rm_block_variables"), \
+             st.expander("3. Variables", expanded=True):
+            st.caption(HINTS["rm_variables"])
 
-            search_res = None
-            auto_stations = []
-            if auto:
-                search_res = search_best_matches(region_py, station_pentad,
-                                                 p_lo, p_hi, y_lo, y_hi,
-                                                 ordered_vars, top_k=3)
-                for r in search_res["top"]:
-                    if r["station"] not in auto_stations:
-                        auto_stations.append(r["station"])
-                if cap:
-                    auto_stations = auto_stations[:cap]
-                if not auto_stations:
-                    auto_stations = [all_stations[0]]
+            # A multiselect, not a checkbox row: consistent with how every
+            # other section in this app (ts_stations, anom_stations,
+            # data_stations) already lets the user pick a subset from a
+            # named list, and 8 options read tighter as one dropdown than as
+            # 8 boxes at this column width.
+            default_vars = [v for v, m in GRID_VARS.items() if m["default"]]
+            rm_vars = st.multiselect(
+                "Variables", list(GRID_VARS), default=default_vars,
+                format_func=lambda v: GRID_VARS[v]["label"], key="rm_vars")
+            if len(rm_vars) < 3:
+                st.warning("Fewer than three variables selected. The "
+                          "comparison degenerates below that.")
 
-                # Only RESET the selection when the automatic result itself
-                # changes (a new search, or a cap that trims it
-                # differently) -- once the user has removed some of the
-                # auto-picked stations, that has to survive reruns that
-                # don't change what the search found, or every rerun would
-                # silently put the removed ones back. Removing is allowed;
-                # adding isn't, since the widget's own `options` below is
-                # `auto_stations`, not every station -- there is nothing
-                # else to add.
-                auto_sig = tuple(auto_stations)
-                if st.session_state.get("_rm_auto_stations_sig") != auto_sig:
-                    st.session_state.rm_radar_stations = list(auto_stations)
-                    st.session_state["_rm_auto_stations_sig"] = auto_sig
-                else:
-                    kept = [s for s in st.session_state.get("rm_radar_stations", [])
-                           if s in auto_stations]
-                    st.session_state.rm_radar_stations = kept or list(auto_stations)
-            elif cap and len(st.session_state.rm_radar_stations) > cap:
-                # Streamlit resets a multiselect's stored value to []
-                # if its own max_selections= changes between reruns of
-                # the SAME keyed widget (verified directly) -- toggling
-                # Distribution <-> Departure was doing exactly that, so
-                # max_selections= is never passed to the widget below at
-                # all; this trim (and the search's own cap above) is the
-                # only enforcement of the Distribution cap.
-                st.session_state.rm_radar_stations = st.session_state.rm_radar_stations[:cap]
+        with st.container(key="rm_block_map"), \
+             st.expander("4. Region and states", expanded=True):
+            st.caption(HINTS["rm_map_block"])
 
-            ctrl_stations, ctrl_window, ctrl_mode = st.columns([3, 4, 2])
+            st.session_state.setdefault("rm_region", REGIONS[0])
+            rm_region = st.segmented_control("Region", REGIONS, key="rm_region")
 
-            with ctrl_mode, st.container(key="rm_ctrl_mode"):
-                # The options say what they do, not what they're called --
-                # "Distribution"/"Departure" stay as the underlying values
-                # (everything else in this file, and CLAUDE.md, refers to
-                # them by those names), only the DISPLAYED text changes,
-                # via format_func. st.radio() has no per-option help text,
-                # so both explanations are combined into the widget's
-                # single help= tooltip instead -- the closest this widget
-                # actually supports, not a full per-option affordance.
-                st.radio(
-                    "Display", ["Distribution", "Departure"],
-                    format_func=lambda m: {"Distribution": "Variable ranges",
-                                          "Departure": "Standardised difference"}[m],
-                    key="rm_display_mode", help=HINTS["rm_display_mode"])
+            region_states = sorted(
+                state_regions.loc[state_regions["region"] == rm_region, "state"])
+            # setdefault(), not default=: the Select all/Clear all buttons
+            # below write this same key via a callback, and Streamlit warns
+            # if a widget gets both an explicit default= and a session_state
+            # write in its history -- setdefault() supplies the one-time
+            # initial value instead, same pattern rm_window/months_sel use.
+            st.session_state.setdefault(f"rm_states_{rm_region}", region_states)
+            st.multiselect("States", region_states,
+                           key=f"rm_states_{rm_region}",
+                           help=HINTS["rm_map_states"])
 
-            with ctrl_stations, st.container(key="rm_ctrl_stations"):
-                if auto:
-                    # options is auto_stations, not all_stations, so
-                    # removing one is possible (an ordinary multiselect
-                    # deselect) but adding a station the search didn't
-                    # pick is not -- there is nothing else in the list to
-                    # add. Not disabled: disabling was what previously
-                    # blocked removal too.
-                    st.multiselect(f"Stations ({len(auto_stations)} found)",
-                                   auto_stations, key="rm_radar_stations",
-                                   help=HINTS["rm_stations_auto"])
-                else:
-                    cap_label = "up to 3" if cap else "any number"
-                    # No max_selections= here -- it must never vary
-                    # between reruns of this same keyed widget (see the
-                    # trim comment above for why), so the Distribution
-                    # cap is enforced entirely by that post-render trim.
-                    st.multiselect(f"Stations ({cap_label})", all_stations,
-                                   key="rm_radar_stations")
-                # Directly below the station picker it governs, not off
-                # in its own column of the control row. Named "...of
-                # stations" since that distinguishes it from a
-                # hypothetical automatic window/variable choice.
-                st.checkbox("Automatic selection of stations", key="rm_auto_select",
-                           help=HINTS["rm_auto_select"])
+            btn_all, btn_clear = st.columns(2)
+            btn_all.button("Select all", key=f"rm_states_all_{rm_region}", width=W,
+                          on_click=_set_state_selection,
+                          args=(f"rm_states_{rm_region}", region_states))
+            btn_clear.button("Clear all", key=f"rm_states_clear_{rm_region}", width=W,
+                             on_click=_set_state_selection,
+                             args=(f"rm_states_{rm_region}", []))
 
-            with ctrl_window, st.container(key="rm_ctrl_window"):
-                if auto:
-                    # Replaced, not merely disabled: one shared slider
-                    # cannot hold three positions once each of the
-                    # automatic top 3 has its own window -- the per-
-                    # station table below is what shows those instead.
-                    st.caption("Station window")
-                    st.caption("Each station uses its own automatically "
-                              "found window — see the table below.")
-                else:
-                    # The label is what explains the control; a plain
-                    # slider (no extra columns squeezing it narrower than
-                    # the month bar below) keeps the two the same width,
-                    # which is what lets the handle sit over the month it
-                    # actually selects. The fill-neutralising CSS lives in
-                    # inject_css(), not an inline st.markdown() call here.
-                    def _fmt_station_start(s):
-                        return f"{_pentad_start_date(s):%b %d}"
+            rm_states = st.session_state.get(f"rm_states_{rm_region}") or []
 
-                    with st.container(key="rm_station_window_slider"):
-                        st.select_slider(
-                            f"Select the start of the {win_days} day window",
-                            options=SEARCH_STARTS, format_func=_fmt_station_start,
-                            key="rm_station_window_start",
-                            help=HINTS["rm_station_window"])
-
-                    _sd, _ed, _wrapped = window_date_range(
-                        st.session_state.rm_station_window_start, win_pentads)
-                    # The ruler is extended by the window's own length, so
-                    # a wrapped block still shows as one continuous strip
-                    # (repeated Jan, Feb, ... after Dec) rather than
-                    # stopping dead at Dec 31. This is still the PRIMARY
-                    # visual for the window; the slider above only sets
-                    # where it starts.
-                    month_scale(highlight=(_sd, _ed, _wrapped), extra_days=gap_days)
-
-                    # KPI-card styling (panel background, bordered box),
-                    # sentence case rather than the KPI label's small-caps
-                    # uppercase, slightly larger type than a plain caption,
-                    # tight against the ruler above and with room before
-                    # the radar below (both via the .st-key-rm_selected_window
-                    # rule in inject_css()) -- this is plain st.markdown
-                    # HTML, not BaseWeb's own internal markup, so unlike
-                    # the slider CSS there is nothing here to be
-                    # unverifiable about.
-                    _wrap_note = " (+1y)" if _wrapped else ""
-                    with st.container(key="rm_selected_window"):
-                        st.markdown(
-                            f'<div style="background:{T["panel"]}; '
-                            f'border:1px solid {T["line"]}; border-radius:8px; '
-                            f'padding:12px 14px; color:{T["muted"]}; font-size:.85rem;">'
-                            f'Selected window: {_sd.strftime("%b")} {_sd.day} to '
-                            f'{_ed.strftime("%b")} {_ed.day}{_wrap_note}</div>',
-                            unsafe_allow_html=True)
-
-            radar_stations = st.session_state.rm_radar_stations or []
-
-            # station_windows: {station: (s_lo, s_hi)}. Manual mode shares
-            # one window (the slider above) across every shown station;
-            # automatic mode gives each its own -- search_best_matches()'s
-            # own answer for that station -- since the top 3 are frequently
-            # not the same window at all.
-            if auto and search_res is not None:
-                auto_window_by_station = {}
-                for r in search_res["top"]:
-                    auto_window_by_station.setdefault(r["station"], (r["p_lo"], r["p_hi"]))
-                station_windows = {
-                    stn: auto_window_by_station.get(stn, (p_lo, p_hi))
-                    for stn in radar_stations
-                }
+            if rm_states:
+                n_cells = len(grid[grid["state"].isin(rm_states)])
+                sel_label = f"{len(rm_states)} state{'s' if len(rm_states) != 1 else ''} selected"
             else:
-                s_lo, s_hi = _wrapped_window(st.session_state.rm_station_window_start,
-                                            win_pentads)
-                station_windows = {stn: (s_lo, s_hi) for stn in radar_stations}
+                n_cells = len(grid[grid["region"] == rm_region])
+                sel_label = f"{rm_region} (all {len(region_states)} states)"
+            st.caption(f"{sel_label} · {n_cells:,} grid cells")
 
-            if not radar_stations:
-                st.info("Select at least one station above to see the radar.")
+            st.plotly_chart(region_map(state_regions, grid, rm_region, rm_states),
+                            width=W, config={"displayModeBar": False})
+
+        with st.container(key="rm_block_radar"), \
+             st.expander("5. Radar and station selection", expanded=True):
+            st.caption(HINTS["rm_radar"])
+
+            if rm_source == "ECONet":
+                st.warning("The station profile below always uses the grid "
+                          "cell (MERRA-2), regardless of this setting. An "
+                          "ECONet-measurements pentad aggregation does not "
+                          "exist yet.")
+
+            if len(rm_vars) == 0:
+                st.info("Select at least one variable in block 3 to see the radar.")
             else:
-                sigma_by_stn = {}
-                width_by_stn = {}
-                cov_by_stn = {}
-                for stn in radar_stations:
-                    s_lo, s_hi = station_windows[stn]
-                    sigma_by_stn[stn] = sigma_dissimilarity(
-                        region_py, station_pentad, stn, s_lo, s_hi, y_lo, y_hi, ordered_vars)
-                    width_by_stn[stn] = width_ratio(
-                        region_py, station_pentad, stn, s_lo, s_hi, y_lo, y_hi, ordered_vars)
-                    cov_by_stn[stn] = coverage(
-                        region_py, station_pentad, stn, s_lo, s_hi, y_lo, y_hi, ordered_vars)
+                p_lo = pentad_of_doy(rm_window[0].timetuple().tm_yday)
+                p_hi = pentad_of_doy(rm_window[1].timetuple().tm_yday)
+                y_lo, y_hi = rm_ref_years
+                selected_states = rm_states if rm_states else region_states
+                all_stations = sorted(station_pentad["station"].unique())
+                # Fixed order every render: the caller's declared GRID_VARS order,
+                # not multiselect selection order, which can reshuffle on rerun.
+                ordered_vars = [v for v in GRID_VARS if v in rm_vars]
+                # The station window always matches the region window's LENGTH,
+                # not its position -- the slider below only translates.
+                win_pentads = p_hi - p_lo + 1
 
-                if st.session_state.rm_display_mode == "Distribution":
-                    fig = region_radar(ordered_vars, region_py, station_pentad,
-                                       radar_stations, scale, p_lo, p_hi,
-                                       station_windows, y_lo, y_hi)
-                else:
-                    fig = region_radar_departure(ordered_vars, region_py, station_pentad,
-                                               radar_stations, station_windows, y_lo, y_hi)
+                region_py = region_pentad_year(state_pentad, state_weights,
+                                               selected_states, p_lo, p_hi,
+                                               y_lo, y_hi, ordered_vars)
+                scale = conus_percentile_scale(y_lo, y_hi)
 
+                st.session_state.setdefault("rm_radar_stations", [all_stations[0]])
+                st.session_state.setdefault("rm_auto_select", False)
+                st.session_state.setdefault("rm_display_mode", "Distribution")
+
+                # The station window's default must keep tracking the region's
+                # own window (position AND length -- either can change above)
+                # whenever it moves, not just on first ever visit: a plain
+                # setdefault() only fires once per session and never re-syncs,
+                # which is what "only slides from January 1" turned out to be
+                # -- whatever position the region window happened to be at the
+                # FIRST time this control was ever drawn (pentad 1, if that
+                # first visit was in Annual mode) stuck permanently, however
+                # often the window above changed afterwards.
+                gap_days = win_pentads * 5
+                # SEARCH_STARTS is odd pentads only (1, 3, ..., 71); p_lo lands
+                # there automatically whenever the region window was reached by
+                # actually dragging its own slider (a 10-real-day step from
+                # Jan 1 always produces an odd pentad), but is not guaranteed
+                # to for an arbitrary p_lo in general -- and select_slider()
+                # silently resets to its FIRST option if ever handed a default
+                # outside its declared `options`, rather than erroring, so an
+                # even p_lo would otherwise snap the station window's default
+                # to Jan 1 without any visible sign why. Floor to the nearest
+                # odd pentad rather than assume.
+                snapped_p_lo = p_lo if p_lo % 2 == 1 else p_lo - 1
+                region_sig = (snapped_p_lo, gap_days)
+                if st.session_state.get("_rm_station_window_region_sig") != region_sig:
+                    st.session_state.rm_station_window_start = snapped_p_lo
+                    st.session_state["_rm_station_window_region_sig"] = region_sig
+                elif "rm_station_window_start" not in st.session_state:
+                    # Region unchanged, but Streamlit prunes a widget's own
+                    # session_state once it stops being rendered for a run --
+                    # automatic mode hides this control entirely, so a full
+                    # auto-on/auto-off cycle silently drops it and a bare
+                    # select_slider() with no existing value to read would
+                    # otherwise reset quietly to its first option (pentad 1)
+                    # instead of where the user actually left it. Restore from
+                    # a shadow key that isn't itself a widget's key and so is
+                    # never pruned.
+                    st.session_state.rm_station_window_start = st.session_state.get(
+                        "_rm_station_window_backup", p_lo)
+
+                # Mirror the live value into that same shadow key whenever it
+                # exists, so the NEXT hide/show cycle restores the actual last
+                # position rather than a stale pre-hide one.
+                if "rm_station_window_start" in st.session_state:
+                    st.session_state["_rm_station_window_backup"] = \
+                        st.session_state.rm_station_window_start
+
+                auto = st.session_state.rm_auto_select
+                cap = 3 if st.session_state.rm_display_mode == "Distribution" else None
+
+                search_res = None
+                auto_stations = []
                 if auto:
-                    auto_rows = []
+                    search_res = search_best_matches(region_py, station_pentad,
+                                                     p_lo, p_hi, y_lo, y_hi,
+                                                     ordered_vars, top_k=3)
+                    for r in search_res["top"]:
+                        if r["station"] not in auto_stations:
+                            auto_stations.append(r["station"])
+                    if cap:
+                        auto_stations = auto_stations[:cap]
+                    if not auto_stations:
+                        auto_stations = [all_stations[0]]
+
+                    # Only RESET the selection when the automatic result itself
+                    # changes (a new search, or a cap that trims it
+                    # differently) -- once the user has removed some of the
+                    # auto-picked stations, that has to survive reruns that
+                    # don't change what the search found, or every rerun would
+                    # silently put the removed ones back. Removing is allowed;
+                    # adding isn't, since the widget's own `options` below is
+                    # `auto_stations`, not every station -- there is nothing
+                    # else to add.
+                    auto_sig = tuple(auto_stations)
+                    if st.session_state.get("_rm_auto_stations_sig") != auto_sig:
+                        st.session_state.rm_radar_stations = list(auto_stations)
+                        st.session_state["_rm_auto_stations_sig"] = auto_sig
+                    else:
+                        kept = [s for s in st.session_state.get("rm_radar_stations", [])
+                               if s in auto_stations]
+                        st.session_state.rm_radar_stations = kept or list(auto_stations)
+                elif cap and len(st.session_state.rm_radar_stations) > cap:
+                    # Streamlit resets a multiselect's stored value to []
+                    # if its own max_selections= changes between reruns of
+                    # the SAME keyed widget (verified directly) -- toggling
+                    # Distribution <-> Departure was doing exactly that, so
+                    # max_selections= is never passed to the widget below at
+                    # all; this trim (and the search's own cap above) is the
+                    # only enforcement of the Distribution cap.
+                    st.session_state.rm_radar_stations = st.session_state.rm_radar_stations[:cap]
+
+                ctrl_stations, ctrl_window, ctrl_mode = st.columns([3, 4, 2])
+
+                with ctrl_mode, st.container(key="rm_ctrl_mode"):
+                    # The options say what they do, not what they're called --
+                    # "Distribution"/"Departure" stay as the underlying values
+                    # (everything else in this file, and CLAUDE.md, refers to
+                    # them by those names), only the DISPLAYED text changes,
+                    # via format_func. st.radio() has no per-option help text,
+                    # so both explanations are combined into the widget's
+                    # single help= tooltip instead -- the closest this widget
+                    # actually supports, not a full per-option affordance.
+                    st.radio(
+                        "Display", ["Distribution", "Departure"],
+                        format_func=lambda m: {"Distribution": "Variable ranges",
+                                              "Departure": "Standardised difference"}[m],
+                        key="rm_display_mode", help=HINTS["rm_display_mode"])
+
+                with ctrl_stations, st.container(key="rm_ctrl_stations"):
+                    if auto:
+                        # options is auto_stations, not all_stations, so
+                        # removing one is possible (an ordinary multiselect
+                        # deselect) but adding a station the search didn't
+                        # pick is not -- there is nothing else in the list to
+                        # add. Not disabled: disabling was what previously
+                        # blocked removal too.
+                        st.multiselect(f"Stations ({len(auto_stations)} found)",
+                                       auto_stations, key="rm_radar_stations",
+                                       help=HINTS["rm_stations_auto"])
+                    else:
+                        cap_label = "up to 3" if cap else "any number"
+                        # No max_selections= here -- it must never vary
+                        # between reruns of this same keyed widget (see the
+                        # trim comment above for why), so the Distribution
+                        # cap is enforced entirely by that post-render trim.
+                        st.multiselect(f"Stations ({cap_label})", all_stations,
+                                       key="rm_radar_stations")
+                    # Directly below the station picker it governs, not off
+                    # in its own column of the control row. Named "...of
+                    # stations" since that distinguishes it from a
+                    # hypothetical automatic window/variable choice.
+                    st.checkbox("Automatic selection of stations", key="rm_auto_select",
+                               help=HINTS["rm_auto_select"])
+
+                with ctrl_window, st.container(key="rm_ctrl_window"):
+                    if auto:
+                        # Replaced, not merely disabled: one shared slider
+                        # cannot hold three positions once each of the
+                        # automatic top 3 has its own window -- the per-
+                        # station table below is what shows those instead.
+                        st.caption("Station window")
+                        st.caption("Each station uses its own automatically "
+                                  "found window — see the table below.")
+                    else:
+                        # The label is what explains the control; a plain
+                        # slider (no extra columns squeezing it narrower than
+                        # the month bar below) keeps the two the same width,
+                        # which is what lets the handle sit over the month it
+                        # actually selects. The fill-neutralising CSS lives in
+                        # inject_css(), not an inline st.markdown() call here.
+                        def _fmt_station_start(s):
+                            return f"{_pentad_start_date(s):%b %d}"
+
+                        with st.container(key="rm_station_window_slider"):
+                            st.select_slider(
+                                f"Select the start of the {win_days} day window",
+                                options=SEARCH_STARTS, format_func=_fmt_station_start,
+                                key="rm_station_window_start",
+                                help=HINTS["rm_station_window"])
+
+                        _sd, _ed, _wrapped = window_date_range(
+                            st.session_state.rm_station_window_start, win_pentads)
+                        # The ruler is extended by the window's own length, so
+                        # a wrapped block still shows as one continuous strip
+                        # (repeated Jan, Feb, ... after Dec) rather than
+                        # stopping dead at Dec 31. This is still the PRIMARY
+                        # visual for the window; the slider above only sets
+                        # where it starts.
+                        month_scale(highlight=(_sd, _ed, _wrapped), extra_days=gap_days)
+
+                        # KPI-card styling (panel background, bordered box),
+                        # sentence case rather than the KPI label's small-caps
+                        # uppercase, slightly larger type than a plain caption,
+                        # tight against the ruler above and with room before
+                        # the radar below (both via the .st-key-rm_selected_window
+                        # rule in inject_css()) -- this is plain st.markdown
+                        # HTML, not BaseWeb's own internal markup, so unlike
+                        # the slider CSS there is nothing here to be
+                        # unverifiable about.
+                        _wrap_note = " (+1y)" if _wrapped else ""
+                        with st.container(key="rm_selected_window"):
+                            st.markdown(
+                                f'<div style="background:{T["panel"]}; '
+                                f'border:1px solid {T["line"]}; border-radius:8px; '
+                                f'padding:12px 14px; color:{T["muted"]}; font-size:.85rem;">'
+                                f'Selected window: {_sd.strftime("%b")} {_sd.day} to '
+                                f'{_ed.strftime("%b")} {_ed.day}{_wrap_note}</div>',
+                                unsafe_allow_html=True)
+
+                radar_stations = st.session_state.rm_radar_stations or []
+
+                # station_windows: {station: (s_lo, s_hi)}. Manual mode shares
+                # one window (the slider above) across every shown station;
+                # automatic mode gives each its own -- search_best_matches()'s
+                # own answer for that station -- since the top 3 are frequently
+                # not the same window at all.
+                if auto and search_res is not None:
+                    auto_window_by_station = {}
+                    for r in search_res["top"]:
+                        auto_window_by_station.setdefault(r["station"], (r["p_lo"], r["p_hi"]))
+                    station_windows = {
+                        stn: auto_window_by_station.get(stn, (p_lo, p_hi))
+                        for stn in radar_stations
+                    }
+                else:
+                    s_lo, s_hi = _wrapped_window(st.session_state.rm_station_window_start,
+                                                win_pentads)
+                    station_windows = {stn: (s_lo, s_hi) for stn in radar_stations}
+
+                if not radar_stations:
+                    st.info("Select at least one station above to see the radar.")
+                else:
+                    sigma_by_stn = {}
+                    width_by_stn = {}
+                    cov_by_stn = {}
                     for stn in radar_stations:
                         s_lo, s_hi = station_windows[stn]
-                        sd, ed, wrapped = window_date_range(s_lo, win_pentads)
-                        sig = sigma_by_stn[stn]["sigma"]
-                        auto_rows.append({
-                            "Station": stn,
-                            "Window": f"{sd:%b %d}–{ed:%b %d}{' (+1y)' if wrapped else ''}",
-                            "Sigma": f"{sig:.2f}" if not np.isnan(sig) else "n/a",
-                        })
-                    # Beside the radar, in the left margin its own domain
-                    # shift and legend placement free up, rather than
-                    # stacked full-width above it.
-                    auto_table_col, chart_col = st.columns([1, 3])
-                    with auto_table_col, st.container(key="rm_auto_table"):
-                        st.dataframe(pd.DataFrame(auto_rows), width=W, hide_index=True)
-                    with chart_col:
-                        st.plotly_chart(fig, width=W, config={"displayModeBar": False})
-                else:
-                    st.plotly_chart(fig, width=W, config={"displayModeBar": False})
+                        sigma_by_stn[stn] = sigma_dissimilarity(
+                            region_py, station_pentad, stn, s_lo, s_hi, y_lo, y_hi, ordered_vars)
+                        width_by_stn[stn] = width_ratio(
+                            region_py, station_pentad, stn, s_lo, s_hi, y_lo, y_hi, ordered_vars)
+                        cov_by_stn[stn] = coverage(
+                            region_py, station_pentad, stn, s_lo, s_hi, y_lo, y_hi, ordered_vars)
 
-                region_caption = (
-                    f"Region average conditions: {p_lo}–{p_hi} pentads "
-                    f"({win_days} days) · {y_lo}–{y_hi} · {len(selected_states)} "
-                    f"state{'s' if len(selected_states) != 1 else ''}.")
-                if auto:
-                    st.caption(f"{region_caption} Each station above at its own "
-                              "automatically found window.")
-                else:
-                    st.caption(
-                        f"{region_caption} Station window: "
-                        f"{_sd:%b %d}–{_ed:%b %d}"
-                        f"{' (wraps into next year)' if _wrapped else ''}.")
-
-                # Sigma dissimilarity and the per-variable table side by
-                # side, not stacked, separated by the same soft vertical
-                # divider already used elsewhere in this block (the
-                # control row's own columns).
-                sigma_col, table_col = st.columns(2)
-
-                with sigma_col, st.container(key="rm_sigma_col"):
-                    st.plotly_chart(sigma_bar_chart(sigma_by_stn, radar_stations),
-                                   width=W, config={"displayModeBar": False})
-                    st.caption(HINTS["rm_sigma"])
-
-                    dropped_msg = "; ".join(
-                        f"{stn}: " + ", ".join(GRID_VARS[v]["label"]
-                                              for v in sigma_by_stn[stn]["dropped"])
-                        for stn in radar_stations if sigma_by_stn[stn]["dropped"])
-                    if dropped_msg:
-                        st.caption("Dropped from sigma dissimilarity — no "
-                                  f"interannual variation at the station: {dropped_msg}")
-
-                with table_col, st.container(key="rm_table_col"):
-                    # Per-variable table: one column per station, not one
-                    # per metric. A toggle switches every station's column
-                    # at once between the departure in native display
-                    # units (convert_delta(), since it is a difference),
-                    # the same departure standardised by the station's
-                    # own interannual SD -- sigma_dissimilarity()'s own
-                    # per-variable z, the exact number the Departure radar
-                    # plots, so the table and that chart always agree --
-                    # width_ratio(): the station's band width divided by
-                    # the region's, on the same _coverage_band_sample()
-                    # axis coverage() and the radar's rings use. Coverage
-                    # alone cannot tell a station that covers the region
-                    # by sitting on top of it from one that covers it by
-                    # being three times wider; this is the only place
-                    # that distinction is visible -- and coverage()
-                    # itself, genuine MESS: the pooled fraction of the
-                    # region's values that fall inside the station's own
-                    # band, per variable. Not drawn on the radar (that
-                    # drawing read poorly with more than one station and
-                    # was removed); this table is the only place it is
-                    # reported at all now.
-                    st.session_state.setdefault("rm_table_units", "Native units")
-                    st.radio("Units",
-                            ["Native units", "Interannual SD units",
-                             "Width ratio", "Coverage"],
-                            key="rm_table_units", horizontal=True,
-                            label_visibility="collapsed")
-                    table_mode = st.session_state.rm_table_units
-                    standardized = table_mode == "Interannual SD units"
-                    width_mode = table_mode == "Width ratio"
-                    coverage_mode = table_mode == "Coverage"
-
-                    def _station_col_header(stn):
-                        # Automatic mode: the header itself carries that
-                        # station's own window and sigma, since each of
-                        # the top 3 generally has a different one --
-                        # without this a column of numbers alone wouldn't
-                        # say which window it was computed over.
-                        if not auto:
-                            return stn
-                        s_lo, s_hi = station_windows[stn]
-                        sd, ed, wrapped = window_date_range(s_lo, win_pentads)
-                        sig = sigma_by_stn[stn]["sigma"]
-                        sig_txt = f"{sig:.2f}σ" if not np.isnan(sig) else "n/a"
-                        return (f"{stn} ({sd:%b %d}–{ed:%b %d}"
-                               f"{' +1y' if wrapped else ''}, {sig_txt})")
-
-                    rows = []
-                    for v in ordered_vars:
-                        kind = GRID_VARS[v]["kind"]
-                        rate_scale = win_days if v in RATE_VARS else 1
-                        var_label = GRID_VARS[v]["label"]
-                        rec = {"Variable": var_label if standardized or width_mode or coverage_mode
-                              else f"{var_label}{unit_suffix(kind, metric)}"}
-                        for stn in radar_stations:
-                            col = _station_col_header(stn)
-                            if coverage_mode:
-                                rec[col] = round(cov_by_stn[stn][v], 2)
-                            elif width_mode:
-                                wr = width_by_stn[stn][v]
-                                rec[col] = round(wr, 2) if not np.isnan(wr) else None
-                            elif standardized:
-                                z = sigma_by_stn[stn]["per_variable"][v]["z"]
-                                rec[col] = round(z, 2) if not np.isnan(z) else None
-                            else:
-                                dep_raw = (sigma_by_stn[stn]["per_variable"][v]["departure"]
-                                          * rate_scale)
-                                rec[col] = round(convert_delta(dep_raw, kind, metric), 2)
-                        rows.append(rec)
-                    st.dataframe(pd.DataFrame(rows), width=W, hide_index=True)
-                    if coverage_mode:
-                        st.caption("Share of the region's values that fall inside the "
-                                  "station's own band, per variable (genuine MESS) -- "
-                                  "asymmetric: a station much wider than the region "
-                                  "scores the same as a perfect match, which is what "
-                                  "the width ratio above is for.")
-                    elif width_mode:
-                        st.caption("Station band width ÷ region band width. Above "
-                                  "1 means the station covers partly by being wider "
-                                  "than the region, not by sitting on it; below 1 "
-                                  "means the station's own band is narrower than the "
-                                  "region's, so even a covered region sits close to "
-                                  "the station's edge.")
-                    elif standardized:
-                        st.caption("Departure in station-interannual sigma units: "
-                                  "region average conditions minus station, divided "
-                                  "by that station's own interannual SD -- the same "
-                                  "number the Departure radar's axes plot. Blank: "
-                                  "no interannual variation at the station to divide by.")
+                    if st.session_state.rm_display_mode == "Distribution":
+                        fig = region_radar(ordered_vars, region_py, station_pentad,
+                                           radar_stations, scale, p_lo, p_hi,
+                                           station_windows, y_lo, y_hi)
                     else:
-                        st.caption("Departure in native units: region average "
-                                  "conditions minus station, signed.")
+                        fig = region_radar_departure(ordered_vars, region_py, station_pentad,
+                                                   radar_stations, station_windows, y_lo, y_hi)
 
-    with st.container(key="rm_block_boxplots"), \
-         st.expander("6. Boxplots", expanded=False):
-        st.caption(HINTS["rm_boxplots"])
+                    if auto:
+                        auto_rows = []
+                        for stn in radar_stations:
+                            s_lo, s_hi = station_windows[stn]
+                            sd, ed, wrapped = window_date_range(s_lo, win_pentads)
+                            sig = sigma_by_stn[stn]["sigma"]
+                            auto_rows.append({
+                                "Station": stn,
+                                "Window": f"{sd:%b %d}–{ed:%b %d}{' (+1y)' if wrapped else ''}",
+                                "Sigma": f"{sig:.2f}" if not np.isnan(sig) else "n/a",
+                            })
+                        # Beside the radar, in the left margin its own domain
+                        # shift and legend placement free up, rather than
+                        # stacked full-width above it.
+                        auto_table_col, chart_col = st.columns([1, 3])
+                        with auto_table_col, st.container(key="rm_auto_table"):
+                            st.dataframe(pd.DataFrame(auto_rows), width=W, hide_index=True)
+                        with chart_col:
+                            st.plotly_chart(fig, width=W, config={"displayModeBar": False})
+                    else:
+                        st.plotly_chart(fig, width=W, config={"displayModeBar": False})
 
-        if len(rm_vars) == 0:
-            st.info("Select at least one variable in block 3 to see the boxplots.")
-        elif not radar_stations:
-            st.info("Select at least one station in block 5 to see the boxplots.")
-        else:
-            n_rows = (len(ordered_vars) + BOXPLOT_COLS - 1) // BOXPLOT_COLS
-            box_fig, box_table = region_station_boxplots(
-                ordered_vars, region_py, station_pentad, radar_stations,
-                station_windows, p_lo, win_pentads, win_days, y_lo, y_hi,
-                metric, auto)
-            chart_or_table(box_fig, box_table, key="rm_boxplots_view",
-                           filename="region_station_boxplots.csv",
-                           height=260 * n_rows)
+                    region_caption = (
+                        f"Region average conditions: {p_lo}–{p_hi} pentads "
+                        f"({win_days} days) · {y_lo}–{y_hi} · {len(selected_states)} "
+                        f"state{'s' if len(selected_states) != 1 else ''}.")
+                    if auto:
+                        st.caption(f"{region_caption} Each station above at its own "
+                                  "automatically found window.")
+                    else:
+                        st.caption(
+                            f"{region_caption} Station window: "
+                            f"{_sd:%b %d}–{_ed:%b %d}"
+                            f"{' (wraps into next year)' if _wrapped else ''}.")
+
+                    # Sigma dissimilarity and the per-variable table side by
+                    # side, not stacked, separated by the same soft vertical
+                    # divider already used elsewhere in this block (the
+                    # control row's own columns).
+                    sigma_col, table_col = st.columns(2)
+
+                    with sigma_col, st.container(key="rm_sigma_col"):
+                        st.plotly_chart(sigma_bar_chart(sigma_by_stn, radar_stations),
+                                       width=W, config={"displayModeBar": False})
+                        st.caption(HINTS["rm_sigma"])
+
+                        dropped_msg = "; ".join(
+                            f"{stn}: " + ", ".join(GRID_VARS[v]["label"]
+                                                  for v in sigma_by_stn[stn]["dropped"])
+                            for stn in radar_stations if sigma_by_stn[stn]["dropped"])
+                        if dropped_msg:
+                            st.caption("Dropped from sigma dissimilarity — no "
+                                      f"interannual variation at the station: {dropped_msg}")
+
+                    with table_col, st.container(key="rm_table_col"):
+                        # Per-variable table: one column per station, not one
+                        # per metric. A toggle switches every station's column
+                        # at once between the departure in native display
+                        # units (convert_delta(), since it is a difference),
+                        # the same departure standardised by the station's
+                        # own interannual SD -- sigma_dissimilarity()'s own
+                        # per-variable z, the exact number the Departure radar
+                        # plots, so the table and that chart always agree --
+                        # width_ratio(): the station's band width divided by
+                        # the region's, on the same _coverage_band_sample()
+                        # axis coverage() and the radar's rings use. Coverage
+                        # alone cannot tell a station that covers the region
+                        # by sitting on top of it from one that covers it by
+                        # being three times wider; this is the only place
+                        # that distinction is visible -- and coverage()
+                        # itself, genuine MESS: the pooled fraction of the
+                        # region's values that fall inside the station's own
+                        # band, per variable. Not drawn on the radar (that
+                        # drawing read poorly with more than one station and
+                        # was removed); this table is the only place it is
+                        # reported at all now.
+                        st.session_state.setdefault("rm_table_units", "Native units")
+                        st.radio("Units",
+                                ["Native units", "Interannual SD units",
+                                 "Width ratio", "Coverage"],
+                                key="rm_table_units", horizontal=True,
+                                label_visibility="collapsed")
+                        table_mode = st.session_state.rm_table_units
+                        standardized = table_mode == "Interannual SD units"
+                        width_mode = table_mode == "Width ratio"
+                        coverage_mode = table_mode == "Coverage"
+
+                        def _station_col_header(stn):
+                            # Automatic mode: the header itself carries that
+                            # station's own window and sigma, since each of
+                            # the top 3 generally has a different one --
+                            # without this a column of numbers alone wouldn't
+                            # say which window it was computed over.
+                            if not auto:
+                                return stn
+                            s_lo, s_hi = station_windows[stn]
+                            sd, ed, wrapped = window_date_range(s_lo, win_pentads)
+                            sig = sigma_by_stn[stn]["sigma"]
+                            sig_txt = f"{sig:.2f}σ" if not np.isnan(sig) else "n/a"
+                            return (f"{stn} ({sd:%b %d}–{ed:%b %d}"
+                                   f"{' +1y' if wrapped else ''}, {sig_txt})")
+
+                        rows = []
+                        for v in ordered_vars:
+                            kind = GRID_VARS[v]["kind"]
+                            rate_scale = win_days if v in RATE_VARS else 1
+                            var_label = GRID_VARS[v]["label"]
+                            rec = {"Variable": var_label if standardized or width_mode or coverage_mode
+                                  else f"{var_label}{unit_suffix(kind, metric)}"}
+                            for stn in radar_stations:
+                                col = _station_col_header(stn)
+                                if coverage_mode:
+                                    rec[col] = round(cov_by_stn[stn][v], 2)
+                                elif width_mode:
+                                    wr = width_by_stn[stn][v]
+                                    rec[col] = round(wr, 2) if not np.isnan(wr) else None
+                                elif standardized:
+                                    z = sigma_by_stn[stn]["per_variable"][v]["z"]
+                                    rec[col] = round(z, 2) if not np.isnan(z) else None
+                                else:
+                                    dep_raw = (sigma_by_stn[stn]["per_variable"][v]["departure"]
+                                              * rate_scale)
+                                    rec[col] = round(convert_delta(dep_raw, kind, metric), 2)
+                            rows.append(rec)
+                        st.dataframe(pd.DataFrame(rows), width=W, hide_index=True)
+                        if coverage_mode:
+                            st.caption("Share of the region's values that fall inside the "
+                                      "station's own band, per variable (genuine MESS) -- "
+                                      "asymmetric: a station much wider than the region "
+                                      "scores the same as a perfect match, which is what "
+                                      "the width ratio above is for.")
+                        elif width_mode:
+                            st.caption("Station band width ÷ region band width. Above "
+                                      "1 means the station covers partly by being wider "
+                                      "than the region, not by sitting on it; below 1 "
+                                      "means the station's own band is narrower than the "
+                                      "region's, so even a covered region sits close to "
+                                      "the station's edge.")
+                        elif standardized:
+                            st.caption("Departure in station-interannual sigma units: "
+                                      "region average conditions minus station, divided "
+                                      "by that station's own interannual SD -- the same "
+                                      "number the Departure radar's axes plot. Blank: "
+                                      "no interannual variation at the station to divide by.")
+                        else:
+                            st.caption("Departure in native units: region average "
+                                      "conditions minus station, signed.")
+
+        with st.container(key="rm_block_boxplots"), \
+             st.expander("6. Boxplots", expanded=False):
+            st.caption(HINTS["rm_boxplots"])
+
+            if len(rm_vars) == 0:
+                st.info("Select at least one variable in block 3 to see the boxplots.")
+            elif not radar_stations:
+                st.info("Select at least one station in block 5 to see the boxplots.")
+            else:
+                n_rows = (len(ordered_vars) + BOXPLOT_COLS - 1) // BOXPLOT_COLS
+                box_fig, box_table = region_station_boxplots(
+                    ordered_vars, region_py, station_pentad, radar_stations,
+                    station_windows, p_lo, win_pentads, win_days, y_lo, y_hi,
+                    metric, auto)
+                chart_or_table(box_fig, box_table, key="rm_boxplots_view",
+                               filename="region_station_boxplots.csv",
+                               height=260 * n_rows)
 
 
 # "Data" is hidden from NAV (Region Matching took its slot) but this branch
