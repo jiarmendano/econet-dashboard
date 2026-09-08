@@ -299,15 +299,16 @@ def inject_css(t):
          box instead. */
       .st-key-anom_stations_note {{ margin-top:28px; }}
 
-      /* Region Matching's 6 blocks get the same expander-header weight
+      /* Region Matching's 4 blocks (Task C: was 6, Time window and
+         Variables merged into one) get the same expander-header weight
          Overview's two section expanders use, but as one attribute-prefix
-         selector instead of Overview's enumerated pair — 6 keys in a
-         comma list would be unwieldy where 2 isn't. */
+         selector instead of Overview's enumerated pair — a comma list of
+         keys would be unwieldy where 2 isn't. */
       [class*="st-key-rm_block_"] > div[data-testid="stLayoutWrapper"]
           > div[data-testid="stExpander"] > details > summary p {{
           font-size:1.125rem; font-weight:600; letter-spacing:-.01em; }}
 
-      /* Block 1's reference-period/data-source row: a soft vertical
+      /* The reference-period/data-source block's row: a soft vertical
          divider between the two halves, and a fixed-height caption so
          both controls START at the same y regardless of how each side's
          own help text happens to wrap. That alone still leaves the
@@ -316,18 +317,35 @@ def inject_css(t):
          labels above the track itself, which a radio group has no
          equivalent of, so the radio needs an explicit nudge down to
          land level with the track/handles rather than with the whole
-         slider widget's top edge. */
+         slider widget's top edge.
+
+         1.6em, not the merged block's own 2.6em (below): checked live
+         (Task C) -- both of THIS row's captions render as one line at
+         normal width (22px natural height each), so reserving 2.6em
+         (~42px) was leaving about 20px of dead space under each one for
+         no reason, on top of the 28px nudge already below it. The merged
+         block's own right-hand caption genuinely wraps to two lines
+         (45px), so its 2.6em stays -- dropping it there would misalign
+         its own pair instead of fixing anything. */
       .st-key-rm_source_col {{
           border-left:1px solid {t['muted']}4d; padding-left:24px; }}
       .st-key-rm_ref_col > div[data-testid="stElementContainer"]:first-child,
       .st-key-rm_source_col > div[data-testid="stElementContainer"]:first-child {{
-          min-height:2.6em; }}
+          min-height:1.6em; }}
       .st-key-rm_source_col > div[data-testid="stElementContainer"]:nth-child(2) {{
           margin-top:28px; }}
 
-      /* Block 6's three control columns (stations, station window,
-         display mode): the same soft vertical divider as block 1's row,
-         between each pair. */
+      /* Time window and Variables (Task C merge): the same soft vertical
+         divider and fixed-height-caption treatment as the row above. */
+      .st-key-rm_vars_col {{
+          border-left:1px solid {t['muted']}4d; padding-left:24px; }}
+      .st-key-rm_window_col > div[data-testid="stElementContainer"]:first-child,
+      .st-key-rm_vars_col > div[data-testid="stElementContainer"]:first-child {{
+          min-height:2.6em; }}
+
+      /* The station-matching block's three control columns (stations,
+         station window, display mode): the same soft vertical divider as
+         the rows above, between each pair. */
       .st-key-rm_ctrl_window, .st-key-rm_ctrl_mode {{
           border-left:1px solid {t['muted']}4d; padding-left:24px; }}
 
@@ -1120,6 +1138,26 @@ def region_map(state_regions, cells, active_region, active_states, height=460):
     scope="usa": nc_map()'s Mercator choice is to avoid tilting North
     Carolina at that latitude; at the full-country scale Albers (what
     scope="usa" gives Plotly) is the projection that's actually correct.
+
+    Contrast between the three layers (Task C): checked live against a
+    running instance. State boundaries were marker_line_color=T["bg"] --
+    literally the page background colour, so a state's border against
+    another state IN THE SAME REGION (same fill) was invisible, and only
+    the seam BETWEEN two different-coloured regions read as a line at
+    all, by accident of the two fills differing rather than the line
+    itself being visible. Now T["line"] (the same subtle-but-real
+    gridline grey every chart in this file already uses), at 0.75 width
+    instead of 0.5, so an individual state's outline reads inside its
+    own region, not only at a region-to-region seam. The muted grid-cell
+    backdrop was T["muted"] at 0.5 opacity, size 3 -- pale grey dots that
+    all but disappeared into the similarly pale USDA_REGION_COLORS
+    pastels; darkened to T["text"] at 0.6 opacity so the dots read as a
+    distinct layer against any of the five fills, not just the ones with
+    more value contrast against grey. The selection highlight
+    (T["accent"]) already had good hue contrast on its own; added a thin
+    T["bg"] halo (marker line) so it stays crisp against Southeast's own
+    salmon fill specifically, the one USDA_REGION_COLORS tone close
+    enough to the accent's hue that the dots could blur into it.
     """
     region_colors = dict(zip(REGIONS, T["region_colors"]))
 
@@ -1132,7 +1170,7 @@ def region_map(state_regions, cells, active_region, active_states, height=460):
             locations=[STATE_ABBR[s] for s in sub["state"]],
             z=[1] * len(sub), locationmode="USA-states",
             colorscale=[[0, c], [1, c]], showscale=False,
-            marker_line_color=T["bg"], marker_line_width=.5,
+            marker_line_color=T["line"], marker_line_width=.75,
             marker_opacity=1.0 if reg == active_region else .25,
             text=sub["state"], hovertemplate="%{text}<extra></extra>",
             name=reg, showlegend=False))
@@ -1140,7 +1178,7 @@ def region_map(state_regions, cells, active_region, active_states, height=460):
     # every cell, muted, so the map reads the same regardless of selection
     fig.add_trace(go.Scattergeo(
         lon=cells["lon"], lat=cells["lat"], mode="markers",
-        marker=dict(size=3, color=T["muted"], opacity=.5),
+        marker=dict(size=3, color=T["text"], opacity=.6),
         hoverinfo="skip", showlegend=False))
 
     # the current selection highlighted on top: selected states if any,
@@ -1151,7 +1189,8 @@ def region_map(state_regions, cells, active_region, active_states, height=460):
         hi = cells[cells["region"] == active_region]
     fig.add_trace(go.Scattergeo(
         lon=hi["lon"], lat=hi["lat"], mode="markers",
-        marker=dict(size=4.5, color=T["accent"]),
+        marker=dict(size=4.5, color=T["accent"],
+                    line=dict(color=T["bg"], width=.5)),
         hoverinfo="skip", showlegend=False))
 
     fig.update_geos(scope="usa", bgcolor="rgba(0,0,0,0)")
@@ -1289,8 +1328,9 @@ def pentad_of_doy(doy):
 
 # state_pentad.parquet stores PRECTOTCORR and THI_ge_79 as rates (mean
 # mm/day, fraction of days), not totals — see GRID_VARS and CLAUDE.md,
-# "Store rates, not totals". Decision from block 3 (Variables): scale these by the
-# window length in days at display time, here, rather than showing a
+# "Store rates, not totals". Decision from the Variables half of the
+# time-window-and-variables block: scale these by the window length in
+# days at display time, here, rather than showing a
 # rate. DTR and interdiurnal_T2M are temperature *differences*; they need
 # convert_delta() rather than convert() wherever a profile gets displayed.
 RATE_VARS = {"PRECTOTCORR", "THI_ge_79"}
@@ -2877,79 +2917,8 @@ elif section == "Region Matching":
                             config={"displayModeBar": False})
 
     with tab_advanced:
-        with st.container(key="rm_block_reference"), \
-             st.expander("1. Reference period and data source", expanded=True):
-            ref_col, source_col = st.columns(2)
-
-            with ref_col, st.container(key="rm_ref_col"):
-                st.caption(HINTS["rm_reference_period"])
-                rm_ref_years = st.slider("Years", 1991, 2025, (1991, 2025),
-                                         key="rm_ref_years")
-                if rm_ref_years[1] - rm_ref_years[0] + 1 < 20:
-                    st.warning("Under 20 years, the interannual variability "
-                              "diagnostic (block 5) stops meaning much.")
-
-            with source_col, st.container(key="rm_source_col"):
-                st.caption(HINTS["rm_station_source_block"])
-                rm_source = st.radio(
-                    "NC stations data source", ["MERRA-2 (recommended)", "ECONet"],
-                    key="rm_source", horizontal=True, label_visibility="collapsed",
-                    help=HINTS["rm_station_source_control"])
-                if rm_source == "ECONet" and rm_ref_years[0] < 2006:
-                    st.warning("ECONet station records only go back to 2006. Move "
-                              "the reference period's start year to 2006 or later, "
-                              "or switch back to MERRA-2.")
-
-        with st.container(key="rm_block_window"), \
-             st.expander("2. Time window exploration", expanded=True):
-            st.caption(HINTS["rm_window_block"])
-
-            st.session_state.setdefault("rm_window_mode", "Subannual")
-            st.radio("Coverage", ["Annual", "Subannual"], key="rm_window_mode",
-                     horizontal=True, on_change=_set_rm_window_annual)
-            is_annual = st.session_state.rm_window_mode == "Annual"
-
-            # No value= here: _set_rm_window_annual() writes rm_window's
-            # session_state directly on toggle, and Streamlit warns (a real
-            # policy check, not just style) if a keyed widget gets both an
-            # explicit value and a pre-existing session_state entry. setdefault
-            # supplies the one-time initial value instead, same as months_sel
-            # and trend_rate_control's key do it elsewhere in this file.
-            st.session_state.setdefault(
-                "rm_window", (date(2001, 6, 1), date(2001, 7, 30)))
-            rm_window = st.slider(
-                "Window", min_value=date(2001, 1, 1), max_value=date(2001, 12, 31),
-                step=timedelta(days=10), format="MMM D",
-                key="rm_window", label_visibility="collapsed",
-                disabled=is_annual, help=HINTS["rm_window_control"])
-            if is_annual:
-                rm_window = (date(2001, 1, 1), date(2001, 12, 31))
-            month_scale()
-
-            win_days = (rm_window[1] - rm_window[0]).days + 1
-            if win_days < 28:
-                st.warning("Window is under a month. About 30 days is the "
-                          "shortest supported.")
-
-        with st.container(key="rm_block_variables"), \
-             st.expander("3. Variables", expanded=True):
-            st.caption(HINTS["rm_variables"])
-
-            # A multiselect, not a checkbox row: consistent with how every
-            # other section in this app (ts_stations, anom_stations,
-            # data_stations) already lets the user pick a subset from a
-            # named list, and 8 options read tighter as one dropdown than as
-            # 8 boxes at this column width.
-            default_vars = [v for v, m in GRID_VARS.items() if m["default"]]
-            rm_vars = st.multiselect(
-                "Variables", list(GRID_VARS), default=default_vars,
-                format_func=lambda v: GRID_VARS[v]["label"], key="rm_vars")
-            if len(rm_vars) < 3:
-                st.warning("Fewer than three variables selected. The "
-                          "comparison degenerates below that.")
-
         with st.container(key="rm_block_map"), \
-             st.expander("4. Region and states", expanded=True):
+             st.expander("1. Select the location to explore", expanded=True):
             st.caption(HINTS["rm_map_block"])
 
             st.session_state.setdefault("rm_region", REGIONS[0])
@@ -2988,8 +2957,83 @@ elif section == "Region Matching":
             st.plotly_chart(region_map(state_regions, grid, rm_region, rm_states),
                             width=W, config={"displayModeBar": False})
 
+        with st.container(key="rm_block_window_vars"), \
+             st.expander("2. Select the time exploration window and "
+                        "variables to characterize", expanded=True):
+            window_col, vars_col = st.columns(2)
+
+            with window_col, st.container(key="rm_window_col"):
+                st.caption(HINTS["rm_window_block"])
+
+                st.session_state.setdefault("rm_window_mode", "Subannual")
+                st.radio("Coverage", ["Annual", "Subannual"], key="rm_window_mode",
+                         horizontal=True, on_change=_set_rm_window_annual)
+                is_annual = st.session_state.rm_window_mode == "Annual"
+
+                # No value= here: _set_rm_window_annual() writes rm_window's
+                # session_state directly on toggle, and Streamlit warns (a real
+                # policy check, not just style) if a keyed widget gets both an
+                # explicit value and a pre-existing session_state entry. setdefault
+                # supplies the one-time initial value instead, same as months_sel
+                # and trend_rate_control's key do it elsewhere in this file.
+                st.session_state.setdefault(
+                    "rm_window", (date(2001, 6, 1), date(2001, 7, 30)))
+                rm_window = st.slider(
+                    "Window", min_value=date(2001, 1, 1), max_value=date(2001, 12, 31),
+                    step=timedelta(days=10), format="MMM D",
+                    key="rm_window", label_visibility="collapsed",
+                    disabled=is_annual, help=HINTS["rm_window_control"])
+                if is_annual:
+                    rm_window = (date(2001, 1, 1), date(2001, 12, 31))
+                month_scale()
+
+                win_days = (rm_window[1] - rm_window[0]).days + 1
+                if win_days < 28:
+                    st.warning("Window is under a month. About 30 days is the "
+                              "shortest supported.")
+
+            with vars_col, st.container(key="rm_vars_col"):
+                st.caption(HINTS["rm_variables"])
+
+                # A multiselect, not a checkbox row: consistent with how every
+                # other section in this app (ts_stations, anom_stations,
+                # data_stations) already lets the user pick a subset from a
+                # named list, and 8 options read tighter as one dropdown than as
+                # 8 boxes at this column width.
+                default_vars = [v for v, m in GRID_VARS.items() if m["default"]]
+                rm_vars = st.multiselect(
+                    "Variables", list(GRID_VARS), default=default_vars,
+                    format_func=lambda v: GRID_VARS[v]["label"], key="rm_vars")
+                if len(rm_vars) < 3:
+                    st.warning("Fewer than three variables selected. The "
+                              "comparison degenerates below that.")
+
+        with st.container(key="rm_block_reference"), \
+             st.expander("3. Select the meteorological data source and "
+                        "reference period", expanded=True):
+            ref_col, source_col = st.columns(2)
+
+            with ref_col, st.container(key="rm_ref_col"):
+                st.caption(HINTS["rm_reference_period"])
+                rm_ref_years = st.slider("Years", 1991, 2025, (1991, 2025),
+                                         key="rm_ref_years")
+                if rm_ref_years[1] - rm_ref_years[0] + 1 < 20:
+                    st.warning("Under 20 years, the interannual variability "
+                              "diagnostic (block 4) stops meaning much.")
+
+            with source_col, st.container(key="rm_source_col"):
+                st.caption(HINTS["rm_station_source_block"])
+                rm_source = st.radio(
+                    "NC stations data source", ["MERRA-2 (recommended)", "ECONet"],
+                    key="rm_source", horizontal=True, label_visibility="collapsed",
+                    help=HINTS["rm_station_source_control"])
+                if rm_source == "ECONet" and rm_ref_years[0] < 2006:
+                    st.warning("ECONet station records only go back to 2006. Move "
+                              "the reference period's start year to 2006 or later, "
+                              "or switch back to MERRA-2.")
+
         with st.container(key="rm_block_radar"), \
-             st.expander("5. Radar and station selection", expanded=True):
+             st.expander("4. Match stations to the region", expanded=True):
             st.caption(HINTS["rm_radar"])
 
             if rm_source == "ECONet":
@@ -2999,7 +3043,7 @@ elif section == "Region Matching":
                           "exist yet.")
 
             if len(rm_vars) == 0:
-                st.info("Select at least one variable in block 3 to see the radar.")
+                st.info("Select at least one variable in block 2 to see the radar.")
             else:
                 p_lo = pentad_of_doy(rm_window[0].timetuple().tm_yday)
                 p_hi = pentad_of_doy(rm_window[1].timetuple().tm_yday)
@@ -3400,23 +3444,22 @@ elif section == "Region Matching":
                             st.caption("Departure in native units: region average "
                                       "conditions minus station, signed.")
 
-        with st.container(key="rm_block_boxplots"), \
-             st.expander("6. Boxplots", expanded=False):
-            st.caption(HINTS["rm_boxplots"])
-
-            if len(rm_vars) == 0:
-                st.info("Select at least one variable in block 3 to see the boxplots.")
-            elif not radar_stations:
-                st.info("Select at least one station in block 5 to see the boxplots.")
-            else:
-                n_rows = (len(ordered_vars) + BOXPLOT_COLS - 1) // BOXPLOT_COLS
-                box_fig, box_table = region_station_boxplots(
-                    ordered_vars, region_py, station_pentad, radar_stations,
-                    station_windows, p_lo, win_pentads, win_days, y_lo, y_hi,
-                    metric, auto)
-                chart_or_table(box_fig, box_table, key="rm_boxplots_view",
-                               filename="region_station_boxplots.csv",
-                               height=260 * n_rows)
+                    # Boxplots moved here (Task C) -- directly below the
+                    # sigma dissimilarity value and its per-variable table,
+                    # in the same station-matching block rather than its
+                    # own separate one. Both of this content's own
+                    # preconditions (a variable selected, a station
+                    # selected) are already guaranteed by this point, by
+                    # the two branches above -- see HINTS["rm_boxplots"].
+                    st.caption(HINTS["rm_boxplots"])
+                    n_rows = (len(ordered_vars) + BOXPLOT_COLS - 1) // BOXPLOT_COLS
+                    box_fig, box_table = region_station_boxplots(
+                        ordered_vars, region_py, station_pentad, radar_stations,
+                        station_windows, p_lo, win_pentads, win_days, y_lo, y_hi,
+                        metric, auto)
+                    chart_or_table(box_fig, box_table, key="rm_boxplots_view",
+                                   filename="region_station_boxplots.csv",
+                                   height=260 * n_rows)
 
 
 # "Data" is hidden from NAV (Region Matching took its slot) but this branch
