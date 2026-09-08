@@ -358,31 +358,33 @@ def inject_css(t):
           padding-top:8px; }}
 
       /* Station reach's window-length control (segmented_control) next
-         to the time-window and variable selectboxes: BaseWeb renders a
-         segmented control shorter than a selectbox's own input box, so
-         the row started level with the other two but didn't match their
-         height. min-height alone on the outer div left the pills their
-         normal (shorter) size with dead space around them, since a
-         min-height on a flex parent doesn't stretch its children unless
-         told to -- align-items:stretch plus a matching min-height on the
-         label itself is what actually grows the pills. Best effort,
-         unverified in a browser this session. */
-      .st-key-reach_length_ctrl div[data-testid="stSegmentedControl"] {{
-          min-height:2.9rem; }}
-      .st-key-reach_length_ctrl div[data-testid="stSegmentedControl"] > div {{
-          align-items:stretch; height:100%; }}
-      .st-key-reach_length_ctrl div[data-testid="stSegmentedControl"] label {{
-          min-height:2.9rem; display:flex; align-items:center; justify-content:center; }}
+         to the time-window and variable selectboxes. Checked live in a
+         running instance of this app (Streamlit 1.62), not guessed:
+         the pill buttons are data-variant="segmented_control" (not the
+         "stSegmentedControl" testid an earlier pass assumed, which
+         doesn't exist and matched nothing), each with an explicit,
+         not just default, height of 32px -- 8px short of the station
+         buttons and the Time window/Variable selectboxes' own boxes,
+         both measured at exactly 40px in the same instance. Setting
+         both height and min-height to that same 40px is what actually
+         grows the pills; min-height alone left them their normal
+         shorter size with dead space around them, since their height
+         was explicit, not min-content. */
+      .st-key-reach_length_ctrl button[data-variant="segmented_control"] {{
+          height:40px; min-height:40px; }}
 
       /* The left step button's own column left-aligns it by default,
          same as the right button's -- but the left button's column sits
          BEFORE the dropdown, so left-aligning puts empty space between
-         the button and the box instead of against it. Right-aligning
-         only this one button closes that gap without touching the right
-         button, which is already flush the way a left-aligned button
-         is meant to be. */
-      .st-key-reach_window_prev_ctrl {{
-          display:flex; justify-content:flex-end; }}
+         the button and the box instead of against it. Confirmed live in
+         the same instance: margin-left:auto on the button's own element
+         container closes it to match the right button's gap exactly
+         (16px each); the flex/justify-content version tried first had
+         no effect because this container isn't that flex box's direct
+         child -- a nested stVerticalBlock wrapper is, and that wrapper
+         was already filling the full cross-axis space. */
+      .st-key-reach_window_prev_ctrl div[data-testid="stElementContainer"] {{
+          margin-left:auto; }}
 
       /* Units and Theme, pinned top-left just outside the sidebar (300px
          is Streamlit's default sidebar width; if the sidebar is dragged
