@@ -907,12 +907,11 @@ HINTS = {
         "temperature, diurnal temperature range, day-to-day temperature "
         "change, dew point, precipitation, days THI ≥ 79).",
     "rm_reach_window":
-        "Applies to the destination cell. Every coloured cell is "
-        "compared over this same window. The station side is fitted: for "
-        "each cell, the station's own window is searched over the four "
-        "quarter starts of the same length and the best (lowest-sigma) "
-        "one is used automatically, shown on hover but not chosen here. "
-        "See Advanced search to fix both windows by hand.",
+        "This window applies to every coloured cell on the map. The "
+        "station's own window is picked automatically: the app tries "
+        "four options and keeps the best match. Hover over a cell to "
+        "see which one it picked. To set the station's window yourself, "
+        "use Advanced search.",
     "rm_reference_period":
         "Select the period over which the biometeorological statistics "
         "are calculated.",
