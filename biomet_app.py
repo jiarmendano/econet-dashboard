@@ -781,10 +781,9 @@ with st.sidebar:
     st.divider()
     st.markdown(
         f'<div class="credits">'
-        f'{len(df):,} records selected<br><br>'
         f'Source: NC State Climate Office, ECONet '
         f'(<a href="{URL_NETWORK}" target="_blank">econet.climate.ncsu.edu</a>)'
-        f'<br>Gaps filled with calibrated '
+        f' &amp; '
         f'<a href="{URL_MERRA}" target="_blank">MERRA-2</a> reanalysis'
         f'</div>', unsafe_allow_html=True)
 
@@ -993,7 +992,7 @@ HINTS = {
         "Grid cells are about 55 to 60 km apart, so a radius under 50 km "
         "can easily find nothing even for an ordinary ZIP code.",
     "rm_radar":
-        "Region average conditions against your selected stations. "
+        "Selected region conditions against your selected stations. "
         "Distribution shows each as a solid percentile band -- the "
         "spread of 35 annual window means, the same thing sigma "
         "compares; Departure shows each as a single line at its "
@@ -1001,11 +1000,11 @@ HINTS = {
         "window can sit anywhere in the year, independent of the "
         "region's own window above.",
     "rm_display_mode":
-        "Variable ranges draws each side -- region average conditions and "
+        "Variable ranges draws each side -- selected region conditions and "
         "station -- as its p5-95 percentile band. Capped at 3 stations, "
         "since six annuli is twelve dashed contours and unreadable. "
         "Standardised difference draws each station as a single line at "
-        "its standardised departure from the region average conditions "
+        "its standardised departure from the selected region conditions "
         "-- station-interannual sigma units -- with no station cap, since "
         "each is one line, closer to how the analogue papers plot this "
         "themselves. Its radial background is coloured green/yellow/"
@@ -1035,12 +1034,6 @@ HINTS = {
         "the literature; this is an absolute check, unlike the radar, "
         "which only shows how the selected stations compare to each "
         "other.",
-    "rm_boxplots":
-        "One boxplot per comparison variable, region average conditions "
-        "against each selected station, same pooled pentad-mean sample "
-        "the radar's band is drawn from. In automatic mode each "
-        "station's own window is shown on its axis label, since they "
-        "can differ from one another.",
 }
 
 
@@ -1176,25 +1169,34 @@ def region_map(state_regions, cells, active_region, active_states, height=460):
     Carolina at that latitude; at the full-country scale Albers (what
     scope="usa" gives Plotly) is the projection that's actually correct.
 
-    Contrast between the three layers (Task C): checked live against a
-    running instance. State boundaries were marker_line_color=T["bg"] --
-    literally the page background colour, so a state's border against
-    another state IN THE SAME REGION (same fill) was invisible, and only
-    the seam BETWEEN two different-coloured regions read as a line at
-    all, by accident of the two fills differing rather than the line
-    itself being visible. Now T["line"] (the same subtle-but-real
-    gridline grey every chart in this file already uses), at 0.75 width
-    instead of 0.5, so an individual state's outline reads inside its
-    own region, not only at a region-to-region seam. The muted grid-cell
-    backdrop was T["muted"] at 0.5 opacity, size 3 -- pale grey dots that
-    all but disappeared into the similarly pale USDA_REGION_COLORS
-    pastels; darkened to T["text"] at 0.6 opacity so the dots read as a
-    distinct layer against any of the five fills, not just the ones with
-    more value contrast against grey. The selection highlight
-    (T["accent"]) already had good hue contrast on its own; added a thin
-    T["bg"] halo (marker line) so it stays crisp against Southeast's own
-    salmon fill specifically, the one USDA_REGION_COLORS tone close
-    enough to the accent's hue that the dots could blur into it.
+    Contrast between the three layers (Task C, then a follow-up): checked
+    live against a running instance both times. State boundaries were
+    first marker_line_color=T["bg"] -- literally the page background
+    colour, so a state's border against another state IN THE SAME REGION
+    (same fill) was invisible, and only the seam BETWEEN two different-
+    coloured regions read as a line at all, by accident of the two fills
+    differing rather than the line itself being visible. Moved to
+    T["line"] (the same subtle gridline grey every chart in this file
+    uses) at 0.75 width -- still too faint once real content (2863
+    backdrop dots plus a highlighted selection) was actually on screen,
+    reported after narrowing to a single state specifically, where the
+    Plotly trace spec itself was checked directly (marker.line.color/
+    width read back from the rendered figure, not just eyeballed) and
+    found completely unaffected by the narrowing -- the fade was T["line"]
+    (#E2E0DA in the light theme) simply being too pale a colour for a MAP
+    boundary at that dot density, a gridline-appropriate tone doing a
+    job it was never meant for, not a bug that drops the line
+    conditionally. Now T["muted"] (a real mid-grey, meant for exactly
+    this level of visual weight) at width 1. The muted grid-cell backdrop
+    was T["muted"] at 0.5 opacity, size 3 -- pale grey dots that all but
+    disappeared into the similarly pale USDA_REGION_COLORS pastels;
+    darkened to T["text"] at 0.6 opacity so the dots read as a distinct
+    layer against any of the five fills, not just the ones with more
+    value contrast against grey. The selection highlight (T["accent"])
+    already had good hue contrast on its own; added a thin T["bg"] halo
+    (marker line) so it stays crisp against Southeast's own salmon fill
+    specifically, the one USDA_REGION_COLORS tone close enough to the
+    accent's hue that the dots could blur into it.
     """
     region_colors = dict(zip(REGIONS, T["region_colors"]))
 
@@ -1207,7 +1209,7 @@ def region_map(state_regions, cells, active_region, active_states, height=460):
             locations=[STATE_ABBR[s] for s in sub["state"]],
             z=[1] * len(sub), locationmode="USA-states",
             colorscale=[[0, c], [1, c]], showscale=False,
-            marker_line_color=T["line"], marker_line_width=.75,
+            marker_line_color=T["muted"], marker_line_width=1,
             marker_opacity=1.0 if reg == active_region else .25,
             text=sub["state"], hovertemplate="%{text}<extra></extra>",
             name=reg, showlegend=False))
@@ -1294,7 +1296,7 @@ def zip_radius_map(state_regions, cells, zip_lat=None, zip_lon=None, radius_km=N
             locations=[STATE_ABBR[s] for s in sub["state"]],
             z=[1] * len(sub), locationmode="USA-states",
             colorscale=[[0, c], [1, c]], showscale=False,
-            marker_line_color=T["line"], marker_line_width=.75,
+            marker_line_color=T["muted"], marker_line_width=1,
             text=sub["state"], hovertemplate="%{text}<extra></extra>",
             name=reg, showlegend=False))
 
@@ -1309,7 +1311,7 @@ def zip_radius_map(state_regions, cells, zip_lat=None, zip_lon=None, radius_km=N
         fig.add_trace(go.Scattergeo(
             lat=circle_lat, lon=circle_lon, mode="lines",
             line=dict(color=T["accent"], width=1.5),
-            fill="toself", fillcolor=_hex_to_rgba(T["accent"], 0.15),
+            fill="toself", fillcolor=_hex_to_rgba(T["accent"], 0.25),
             hoverinfo="skip", showlegend=False))
 
         fig.add_trace(go.Scattergeo(
@@ -2250,7 +2252,7 @@ def region_radar(variables, region_py, station_pentad, stations,
         r=outer + [outer[0]], theta=theta_closed, mode="lines", fill="tonext",
         fillcolor=T["accent_soft"], opacity=0.6,
         line=dict(color=T["accent"], width=1.5),
-        name="Region average conditions", hoverinfo="skip"))
+        name="Selected region conditions", hoverinfo="skip"))
 
     for i, stn in enumerate(stations):
         c = STATION_COLORS[i % len(STATION_COLORS)]
@@ -2281,9 +2283,12 @@ def region_radar(variables, region_py, station_pentad, stations,
         # freeing that left margin is also what lets automatic mode's
         # station/window table sit beside the radar (a separate,
         # Streamlit-level column outside this figure) instead of stacked
-        # full-width above it.
+        # full-width above it. Titled with the reference period so the
+        # legend also says what years the percentile bands were built
+        # over, not just which trace is which.
         legend=dict(orientation="v", yanchor="middle", y=0.5,
-                   xanchor="right", x=0.16),
+                   xanchor="right", x=0.16,
+                   title=dict(text=f"Variable distribution ({y_lo}-{y_hi})")),
         polar=dict(
             # Right edge pulled in from 1.0 -- at the full width, the
             # angular axis's own tick labels (they extend OUTWARD from
@@ -2476,7 +2481,7 @@ def region_radar_departure(variables, region_py, station_pentad, stations,
         r=[0] * len(theta_closed), theta=theta_closed, mode="lines+markers",
         line=dict(color=T["accent"], width=2),
         marker=dict(color=T["accent"], size=7, symbol="circle"),
-        name="Region average conditions", hoverinfo="skip"))
+        name="Selected region conditions", hoverinfo="skip"))
 
     for i, stn in enumerate(stations):
         c = STATION_COLORS[i % len(STATION_COLORS)]
@@ -2506,9 +2511,11 @@ def region_radar_departure(variables, region_py, station_pentad, stations,
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
         font=dict(color=T["text"]),
         # Same left-legend/right-shifted-domain treatment as region_radar(),
-        # for the same reason -- see its own comment.
+        # for the same reason -- see its own comment. Same reference-period
+        # title too.
         legend=dict(orientation="v", yanchor="middle", y=0.5,
-                   xanchor="right", x=0.16),
+                   xanchor="right", x=0.16,
+                   title=dict(text=f"Variable distribution ({y_lo}-{y_hi})")),
         polar=dict(
             # Right edge pulled in from 1.0 -- at the full width, the
             # angular axis's own tick labels ran off the canvas edge on
@@ -2521,7 +2528,7 @@ def region_radar_departure(variables, region_py, station_pentad, stations,
                 range=[0, r_max], showline=True, linecolor=T["line"],
                 tickvals=tickvals, ticktext=[str(t) for t in tickvals],
                 gridcolor=T["line"], tickfont=dict(color=T["muted"]),
-                title=dict(text="station-interannual σ from region average conditions",
+                title=dict(text="station-interannual σ from selected region conditions",
                           font=dict(size=11, color=T["muted"]))),
             angularaxis=dict(
                 tickvals=angles, ticktext=ticktext,
@@ -2563,7 +2570,7 @@ def sigma_bar_chart(sigma_by_station, stations, height=260):
         height=height, showlegend=False,
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
         font=dict(color=T["text"]),
-        title=dict(text="Sigma dissimilarity from region average conditions",
+        title=dict(text="Sigma dissimilarity from selected region conditions",
                   font=dict(size=13, color=T["text"])),
         yaxis=dict(title="sigma dissimilarity", gridcolor=T["line"],
                   zerolinecolor=T["line"]),
@@ -2631,10 +2638,17 @@ def region_station_boxplots(ordered_vars, region_py, station_pentad, stations,
     table_rows = []
 
     def add_box(row, col, x_label, name, values, color, legendgroup, show_legend):
+        # Points (boxpoints="all"): thin solid border, translucent fill of
+        # the same colour, rather than a plain opaque dot with no border
+        # -- makes the overlaid sample read as a distinct layer on top of
+        # the box instead of competing with it for the same flat colour.
+        # Same treatment applied to Time series' own boxplot (px.box, below).
         fig.add_trace(go.Box(
             x=[x_label] * len(values), y=values, name=name,
             legendgroup=legendgroup, showlegend=show_legend,
-            marker_color=color, line=dict(color=color),
+            line=dict(color=color),
+            marker=dict(color=_hex_to_rgba(color, 0.4),
+                       line=dict(color=color, width=1)),
             boxpoints="all", hoverinfo="y"), row=row, col=col)
 
     for i, v in enumerate(ordered_vars):
@@ -2859,6 +2873,14 @@ elif section == "Time series":
     box_tbl = tbl[tbl["Station"].isin(ts_stations)]
     box = px.box(box_tbl, x="Station", y=var, color="Station",
                  color_discrete_map=color_map, points="all")
+    # Points: thin solid border, translucent fill of the same colour --
+    # same treatment as Region Matching's own boxplots (region_station_
+    # boxplots()'s add_box()), applied here per-trace since px.box doesn't
+    # take one shared marker style the way a single go.Box() call does.
+    for trace in box.data:
+        c = color_map.get(trace.name, T["accent"])
+        trace.update(marker=dict(color=_hex_to_rgba(c, 0.4),
+                                 line=dict(color=c, width=1)))
     box.update_layout(showlegend=False)
     box.update_yaxes(title=ylab)
     st.plotly_chart(style_fig(box, T, 380), width=W)
@@ -3548,15 +3570,9 @@ elif section == "Region Matching":
                         st.info("Select at least one station above to see the radar.")
                     else:
                         sigma_by_stn = {}
-                        width_by_stn = {}
-                        cov_by_stn = {}
                         for stn in radar_stations:
                             s_lo, s_hi = station_windows[stn]
                             sigma_by_stn[stn] = sigma_dissimilarity(
-                                region_py, station_pentad, stn, s_lo, s_hi, y_lo, y_hi, ordered_vars)
-                            width_by_stn[stn] = width_ratio(
-                                region_py, station_pentad, stn, s_lo, s_hi, y_lo, y_hi, ordered_vars)
-                            cov_by_stn[stn] = coverage(
                                 region_py, station_pentad, stn, s_lo, s_hi, y_lo, y_hi, ordered_vars)
 
                         if st.session_state.rm_display_mode == "Distribution":
@@ -3590,7 +3606,7 @@ elif section == "Region Matching":
                             st.plotly_chart(fig, width=W, config={"displayModeBar": False})
 
                         region_caption = (
-                            f"Region average conditions: {p_lo}–{p_hi} pentads "
+                            f"Selected region conditions: {p_lo}–{p_hi} pentads "
                             f"({win_days} days) · {y_lo}–{y_hi} · {location_label}.")
                         if auto:
                             st.caption(f"{region_caption} Each station above at its own "
@@ -3624,34 +3640,30 @@ elif section == "Region Matching":
                             # Per-variable table: one column per station, not one
                             # per metric. A toggle switches every station's column
                             # at once between the departure in native display
-                            # units (convert_delta(), since it is a difference),
-                            # the same departure standardised by the station's
-                            # own interannual SD -- sigma_dissimilarity()'s own
-                            # per-variable z, the exact number the Departure radar
-                            # plots, so the table and that chart always agree --
-                            # width_ratio(): the station's band width divided by
-                            # the region's, on the same _coverage_band_sample()
-                            # axis coverage() and the radar's rings use. Coverage
-                            # alone cannot tell a station that covers the region
-                            # by sitting on top of it from one that covers it by
-                            # being three times wider; this is the only place
-                            # that distinction is visible -- and coverage()
-                            # itself, genuine MESS: the pooled fraction of the
-                            # region's values that fall inside the station's own
-                            # band, per variable. Not drawn on the radar (that
-                            # drawing read poorly with more than one station and
-                            # was removed); this table is the only place it is
-                            # reported at all now.
+                            # units (convert_delta(), since it is a difference)
+                            # and the same departure standardised by the
+                            # station's own interannual SD -- sigma_dissimilarity()'s
+                            # own per-variable z, the exact number the Departure
+                            # radar plots, so the table and that chart always
+                            # agree. Width ratio and coverage columns removed:
+                            # both were built on _coverage_band_sample()'s pooled
+                            # pentad-year band, a different (wider, seasonal-
+                            # cycle-dominated) axis than the departure/sigma
+                            # columns here, which use the annual-window-mean
+                            # axis sigma_dissimilarity() itself does -- the two
+                            # could disagree on the same pair, reading as a
+                            # contradiction rather than a second view. coverage()
+                            # and width_ratio() stay defined; nothing currently
+                            # calls either (the radar's own coverage-driven alert
+                            # segments were already removed earlier -- see
+                            # region_radar()'s own docstring).
                             st.session_state.setdefault("rm_table_units", "Native units")
                             st.radio("Units",
-                                    ["Native units", "Interannual SD units",
-                                     "Width ratio", "Coverage"],
+                                    ["Native units", "Interannual SD units"],
                                     key="rm_table_units", horizontal=True,
                                     label_visibility="collapsed")
                             table_mode = st.session_state.rm_table_units
                             standardized = table_mode == "Interannual SD units"
-                            width_mode = table_mode == "Width ratio"
-                            coverage_mode = table_mode == "Coverage"
 
                             def _station_col_header(stn):
                                 # Automatic mode: the header itself carries that
@@ -3673,16 +3685,11 @@ elif section == "Region Matching":
                                 kind = GRID_VARS[v]["kind"]
                                 rate_scale = win_days if v in RATE_VARS else 1
                                 var_label = GRID_VARS[v]["label"]
-                                rec = {"Variable": var_label if standardized or width_mode or coverage_mode
+                                rec = {"Variable": var_label if standardized
                                       else f"{var_label}{unit_suffix(kind, metric)}"}
                                 for stn in radar_stations:
                                     col = _station_col_header(stn)
-                                    if coverage_mode:
-                                        rec[col] = round(cov_by_stn[stn][v], 2)
-                                    elif width_mode:
-                                        wr = width_by_stn[stn][v]
-                                        rec[col] = round(wr, 2) if not np.isnan(wr) else None
-                                    elif standardized:
+                                    if standardized:
                                         z = sigma_by_stn[stn]["per_variable"][v]["z"]
                                         rec[col] = round(z, 2) if not np.isnan(z) else None
                                     else:
@@ -3691,27 +3698,14 @@ elif section == "Region Matching":
                                         rec[col] = round(convert_delta(dep_raw, kind, metric), 2)
                                 rows.append(rec)
                             st.dataframe(pd.DataFrame(rows), width=W, hide_index=True)
-                            if coverage_mode:
-                                st.caption("Share of the region's values that fall inside the "
-                                          "station's own band, per variable (genuine MESS) -- "
-                                          "asymmetric: a station much wider than the region "
-                                          "scores the same as a perfect match, which is what "
-                                          "the width ratio above is for.")
-                            elif width_mode:
-                                st.caption("Station band width ÷ region band width. Above "
-                                          "1 means the station covers partly by being wider "
-                                          "than the region, not by sitting on it; below 1 "
-                                          "means the station's own band is narrower than the "
-                                          "region's, so even a covered region sits close to "
-                                          "the station's edge.")
-                            elif standardized:
+                            if standardized:
                                 st.caption("Departure in station-interannual sigma units: "
-                                          "region average conditions minus station, divided "
+                                          "selected region conditions minus station, divided "
                                           "by that station's own interannual SD -- the same "
                                           "number the Departure radar's axes plot. Blank: "
                                           "no interannual variation at the station to divide by.")
                             else:
-                                st.caption("Departure in native units: region average "
+                                st.caption("Departure in native units: selected region "
                                           "conditions minus station, signed.")
 
                         # Boxplots moved here (Task C) -- directly below the
@@ -3720,8 +3714,18 @@ elif section == "Region Matching":
                         # own separate one. Both of this content's own
                         # preconditions (a variable selected, a station
                         # selected) are already guaranteed by this point, by
-                        # the two branches above -- see HINTS["rm_boxplots"].
-                        st.caption(HINTS["rm_boxplots"])
+                        # the two branches above. The explanatory paragraph
+                        # that used to sit here (HINTS["rm_boxplots"]) was
+                        # dropped in favour of a plain horizontal rule, the
+                        # same colour/opacity as the vertical dividers this
+                        # file already uses between blocks -- there wasn't
+                        # anything left worth saying that the boxplots'
+                        # position (right below the sigma table) and their
+                        # own axis labels don't already show.
+                        st.markdown(
+                            f'<hr style="border:none; border-top:1px solid '
+                            f'{T["muted"]}4d; margin:20px 0;">',
+                            unsafe_allow_html=True)
                         n_rows = (len(ordered_vars) + BOXPLOT_COLS - 1) // BOXPLOT_COLS
                         box_fig, _ = region_station_boxplots(
                             ordered_vars, region_py, station_pentad, radar_stations,
