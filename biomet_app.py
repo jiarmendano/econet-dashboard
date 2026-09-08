@@ -30,6 +30,7 @@ STATE_PENTAD_PATH = Path(__file__).parent / "state_pentad.parquet"
 CONUS_GRID_PATH = Path(__file__).parent / "conus_grid.parquet"
 STATION_PENTAD_PATH = Path(__file__).parent / "station_pentad.parquet"
 STATION_REACH_PATH = Path(__file__).parent / "station_reach.parquet"
+CELL_RECTANGLES_PATH = Path(__file__).parent / "cell_rectangles.geojson"
 
 APP_TITLE = "Biometeorological Data Explorer"
 BASE_YEARS = (2006, 2025)      # fixed anomaly reference, never follows the filter
@@ -63,18 +64,33 @@ STATION_COLORS = ["#E69F00", "#56B4E9", "#009E73",
 # choropleth if that turns out to matter in practice.
 USDA_REGION_COLORS = ["#D5C9E1", "#B3FFFF", "#E0DAC2", "#C5FFE4", "#FFB1A7"]
 
+# Station reach map (Task N+1): 7 discrete bins (0-1, 1-2, ..., 5-6, 6+
+# sigma), family changing exactly at 2 and 4 sigma -- two greens, two
+# ambers, two reds, one dark red/maroon for the open-ended top bin.
+# Relative luminance decreases monotonically bin 1 -> bin 7 (checked
+# numerically, not eyeballed: WCAG relative luminance 0.62, 0.46, 0.33,
+# 0.23, 0.15, 0.085, 0.03) so the sequence still reads as "worse and
+# worse" in greyscale, and survives red-green colour blindness, which
+# collapses the hue difference between the green and red families but
+# not this lightness gradient. Same 7 colours in both themes -- sigma
+# severity isn't a light/dark-mode concept -- kept under THEMES anyway,
+# not a standalone module constant, so a future theme swap has one
+# place to change it, the same reasoning region_colors already follows.
+SIGMA_RAMP_7 = ["#95E098", "#52CD58", "#C09530", "#C17029",
+               "#C23D31", "#9A272A", "#591A24"]
+
 THEMES = {
     "dark": dict(
         bg="#0E1418", panel="#161F26", line="#243139",
         text="#E3E9ED", muted="#94A5B0", accent="#D9542B",
         accent_soft="#3A2119", grid="#1E2A32", template="plotly_dark",
-        region_colors=USDA_REGION_COLORS,
+        region_colors=USDA_REGION_COLORS, sigma_ramp=SIGMA_RAMP_7,
     ),
     "light": dict(
         bg="#FBFAF7", panel="#FFFFFF", line="#E2E0DA",
         text="#1B2429", muted="#535E67", accent="#C24A20",
         accent_soft="#F7E4DC", grid="#EDEBE5", template="plotly_white",
-        region_colors=USDA_REGION_COLORS,
+        region_colors=USDA_REGION_COLORS, sigma_ramp=SIGMA_RAMP_7,
     ),
 }
 
@@ -523,15 +539,37 @@ def load_station_pentad(path):
 
 @st.cache_data(show_spinner="Loading station reach")
 def load_station_reach(path):
-    """The Station reach tab's only input: one row per grid cell x
+    """The Station reach tab's main input: one row per grid cell x
     station x region window, the composite sigma dissimilarity of that
-    single cell's own climate against the station, plus which candidate
-    station window won it (station_window — not shown in this tab, kept
-    for a later per-variable view; see precompute_station_reach.py).
-    Precomputed offline (Task N); nothing in this file computes sigma
-    per cell at request time the way sigma_dissimilarity() does for a
-    whole region in Advanced search."""
-    return pd.read_parquet(path)
+    single cell's own climate against the station, plus the winning
+    station window as a display-ready label (station_window -- not shown
+    in this tab itself, kept for a later per-variable view) and
+    sigma_same_window (see precompute_station_reach.py). Precomputed
+    offline (Task N); nothing in this file computes sigma per cell at
+    request time the way sigma_dissimilarity() does for a whole region
+    in Advanced search.
+
+    cell_id is added here, once, cached, rather than recomputed on every
+    rerun: f"{lon:.3f}_{lat:.3f}" on this file's own (float32) lon/lat,
+    the exact format cell_rectangles.geojson's own properties.cell_id
+    uses (r-codes/Build_cell_rectangles_geojson.R) -- Choropleth's
+    featureidkey join for the Task N+1 raster map."""
+    df = pd.read_parquet(path)
+    df["cell_id"] = [f"{lon:.3f}_{lat:.3f}" for lon, lat in zip(df["lon"], df["lat"])]
+    return df
+
+
+@st.cache_data(show_spinner="Loading cell boundaries")
+def load_cell_rectangles(path):
+    """One rectangle polygon per grid cell (properties.cell_id ==
+    f"{lon:.3f}_{lat:.3f}", matching station_reach's own lon/lat exactly
+    -- see r-codes/Build_cell_rectangles_geojson.R), clipped to the real
+    CONUS coastline offline so the station reach map (Task N+1) draws a
+    seamless raster instead of a staircase of raw 0.625 x 0.5 degree
+    boxes along every coast. Loaded once as plain GeoJSON, the same
+    json.load() pattern load_counties() already uses for nc_map()."""
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
 
 
 def aggregate(frame, var, by):
@@ -834,12 +872,12 @@ HINTS = {
         "2017). Fixed variable set -- Advanced search lets you change it "
         "and see each variable on its own.",
     "rm_reach_window":
-        "Annual, or a fixed 3/6/9-month window starting at a quarter "
-        "boundary. For each cell, the station's own matching window is "
-        "searched over the four quarter starts of the same length and "
-        "the best (lowest-sigma) one is used automatically -- which one "
-        "won is not shown here; see Advanced search to compare specific "
-        "windows by hand.",
+        "Applies to the destination cell -- every coloured cell is "
+        "compared over this same window. The station side is fitted: for "
+        "each cell, the station's own window is searched over the four "
+        "quarter starts of the same length and the best (lowest-sigma) "
+        "one is used automatically, shown on hover but not chosen here. "
+        "See Advanced search to fix both windows by hand.",
     "rm_reference_period":
         "Select the period over which the biometeorological statistics "
         "are calculated.",
@@ -1052,35 +1090,84 @@ def region_map(state_regions, cells, active_region, active_states, height=460):
     return fig
 
 
-def station_reach_map(cell_sigma, height=520):
+def _filter_geojson(cell_geojson, cell_ids):
+    """The subset of cell_geojson's features named in cell_ids, as its
+    own FeatureCollection. Each of the 7 bin traces below needs its own
+    `geojson` (Plotly has no shared-geojson-across-traces option), so
+    without this every trace would carry the FULL 2863-cell file and the
+    page would ship cell_rectangles.geojson's ~1 MB seven times over
+    instead of once split seven ways."""
+    ids = set(cell_ids)
+    return {
+        "type": "FeatureCollection",
+        "features": [f for f in cell_geojson["features"]
+                    if f["properties"]["cell_id"] in ids],
+    }
+
+
+def station_reach_map(cell_sigma, cell_geojson, cell_window_label, height=560):
     """Every grid cell, coloured by its own composite sigma dissimilarity
     against one station in one window (station_reach.parquet, already
-    filtered to that one station/window before this is called). Same
-    scope="usa" / transparent-paper convention as region_map(); unlike
-    that map this has no state fill or selection to layer, just the
-    2863 cells themselves as the whole story, so one Scattergeo trace is
-    enough. Colour bands, not a gradient (sigma_stepped_colorscale()) --
-    the same published-threshold reasoning SIGMA_BANDS and the Departure
-    radar's radial background already use, now on a continuous colour
-    axis instead of discrete rings."""
-    fig = go.Figure(go.Scattergeo(
-        lon=cell_sigma["lon"], lat=cell_sigma["lat"], mode="markers",
-        marker=dict(
-            size=5, color=cell_sigma["sigma"],
-            colorscale=sigma_stepped_colorscale(), cmin=0, cmax=STATION_REACH_ZMAX,
-            colorbar=dict(
-                title="σ", thickness=14,
-                tickvals=[0, 2, 3, 4, STATION_REACH_ZMAX],
-                ticktext=["0", "2σ", "3σ", "4σ", f"{STATION_REACH_ZMAX:g}+"]),
-        ),
-        text=[f"{s:.2f}σ" if np.isfinite(s) else "extremely novel (off scale)"
-             for s in cell_sigma["sigma"]],
-        hovertemplate="%{text}<extra></extra>"))
+    filtered to that one station/window, joined to conus_grid.parquet
+    for `state` and carrying station_reach's own `station_window` label,
+    before this is called).
+
+    One go.Choropleth trace per SIGMA_BIN_LABELS bin, each a flat colour
+    (two-stop colorscale trick, same as region_map()'s per-region fill)
+    with marker_line_width=0 so same-bin neighbours read as one seamless
+    raster, and showlegend=True so the 7 bins form a real categorical
+    legend -- clickable/togglable in Plotly the way a shared colourbar
+    never is -- rather than a continuous colour axis with tick labels
+    standing in for one.
+
+    State boundaries are a separate Choropleth trace (transparent fill,
+    thin THEMES line), added AFTER the bin traces so it draws on top of
+    them: geo.showsubunits draws underneath the cell polygons instead
+    and was rejected for exactly that reason."""
+    sigma = cell_sigma["sigma"].to_numpy()
+    bin_idx = sigma_bin_index(sigma)
+    ramp = T["sigma_ramp"]
+
+    fig = go.Figure()
+    for b, label in enumerate(SIGMA_BIN_LABELS):
+        sel = cell_sigma[bin_idx == b]
+        if sel.empty:
+            continue
+        sigma_text = [f"{s:.2f}σ" if np.isfinite(s) else "extremely novel (off scale)"
+                     for s in sel["sigma"]]
+        customdata = np.stack([
+            sel["state"].to_numpy(),
+            np.array(sigma_text, dtype=object),
+            np.full(len(sel), cell_window_label, dtype=object),
+            sel["station_window"].to_numpy(),
+        ], axis=-1)
+        fig.add_trace(go.Choropleth(
+            geojson=_filter_geojson(cell_geojson, sel["cell_id"]),
+            locations=sel["cell_id"], featureidkey="properties.cell_id",
+            z=[1] * len(sel), colorscale=[[0, ramp[b]], [1, ramp[b]]],
+            showscale=False, marker_line_width=0,
+            name=label, showlegend=True,
+            customdata=customdata,
+            hovertemplate=(
+                "State: %{customdata[0]}<br>"
+                "Composite sigma: %{customdata[1]}<br>"
+                "Destination cell window (selected): %{customdata[2]}<br>"
+                "Fitted station window (best match): %{customdata[3]}"
+                "<extra></extra>")))
+
+    fig.add_trace(go.Choropleth(
+        locations=list(STATE_ABBR.values()), locationmode="USA-states",
+        z=[1] * len(STATE_ABBR),
+        colorscale=[[0, "rgba(0,0,0,0)"], [1, "rgba(0,0,0,0)"]],
+        showscale=False, marker_line_color=T["line"], marker_line_width=1,
+        hoverinfo="skip", showlegend=False))
 
     fig.update_geos(scope="usa", bgcolor="rgba(0,0,0,0)")
-    fig.update_layout(height=height, margin=dict(l=0, r=0, t=0, b=0),
-                      paper_bgcolor="rgba(0,0,0,0)", showlegend=False,
-                      font=dict(color=T["text"]))
+    fig.update_layout(
+        height=height, margin=dict(l=0, r=0, t=0, b=0),
+        paper_bgcolor="rgba(0,0,0,0)", font=dict(color=T["text"]),
+        legend=dict(orientation="v", yanchor="middle", y=0.5,
+                    xanchor="left", x=0.01, title=dict(text="σ")))
     return fig
 
 
@@ -1935,37 +2022,26 @@ SIGMA_BANDS = [
     (float("inf"), "#C62828"),  # 4+ sigma: "extremely novel"
 ]
 
-# The Station reach map's colour-scale ceiling. Only affects where the
-# 0-1 normalised scale SIGMA_BANDS' stops get placed on, not the colours
-# themselves -- the top band is flat red from 4 sigma to this ceiling and
-# beyond (Plotly clips marker colours past cmax to the end colour), so
-# any value clearly above 4 works; 6 is just a clean round one. A single
-# extreme cell can and does exceed it (precompute_station_reach.py found
-# one: a chi.sf underflow to exactly 0.0 giving norm.isf(0) = inf, the
-# same float64-near-zero edge case sigma_dissimilarity()'s own docstring
-# already flags for the opposite tail) -- that reads as the same solid
-# red as any other very poor match, which is the correct reading of it.
-STATION_REACH_ZMAX = 6.0
+# Station reach map (Task N+1): 7 fixed bins, replacing an earlier
+# continuous-colourbar version (sigma_stepped_colorscale(), removed --
+# CLAUDE.md's own precedent, deleting a superseded metric outright
+# rather than leaving it for a future reconnection to inherit by
+# accident, applies just as well to a superseded colour scale). A
+# categorical legend needs discrete bins with names, not a colour axis
+# a value gets projected onto, so this is bin edges, not a gradient.
+SIGMA_BIN_EDGES = [1, 2, 3, 4, 5, 6]
+SIGMA_BIN_LABELS = ["0-1σ", "1-2σ", "2-3σ", "3-4σ",
+                    "4-5σ", "5-6σ", "≥6σ"]
 
 
-def sigma_stepped_colorscale(zmax=STATION_REACH_ZMAX):
-    """A Plotly colorscale (list of [0-1 position, colour] stops) that
-    reproduces SIGMA_BANDS' own green/yellow/orange/red bands as hard
-    edges at 2 and 4 sigma, not a gradient between them -- the station
-    reach map is a continuous Plotly colour axis rather than the radar's
-    discrete rings, but the same "papers report bands, not a gradient"
-    reasoning above still applies, so the map should look like the same
-    four bands, not invent a fifth kind of visual language for them."""
-    stops = []
-    lo = 0.0
-    for threshold, color in SIGMA_BANDS:
-        hi = 1.0 if threshold == float("inf") else min(threshold / zmax, 1.0)
-        stops.append([lo, color])
-        stops.append([hi, color])
-        lo = hi
-        if hi >= 1.0:
-            break
-    return stops
+def sigma_bin_index(sigma):
+    """Which of SIGMA_BIN_LABELS' 7 bins a sigma value (scalar or array)
+    falls in, 0-6. searchsorted(..., side="right"), not np.digitize's
+    default rule -- unambiguous at the edges and handles +inf as the top
+    bin with no special case (chi.sf underflow to exactly 0 -- see the
+    WAYN/Annual cell logged in the precompute commit -- sorts above
+    every finite edge with no extra branch needed)."""
+    return np.searchsorted(SIGMA_BIN_EDGES, sigma, side="right")
 
 
 def sigma_band_color(sigma):
@@ -2578,11 +2654,14 @@ elif section == "Region Matching":
     # frame can't, over its own pre-aggregated input. See CLAUDE.md, "The
     # Region matching section", for the full block-by-block design.
     if (not STATE_PENTAD_PATH.exists() or not CONUS_GRID_PATH.exists()
-            or not STATION_PENTAD_PATH.exists() or not STATION_REACH_PATH.exists()):
+            or not STATION_PENTAD_PATH.exists() or not STATION_REACH_PATH.exists()
+            or not CELL_RECTANGLES_PATH.exists()):
         st.error("state_pentad.parquet, conus_grid.parquet, "
-                 "station_pentad.parquet and/or station_reach.parquet not "
-                 "found next to this script. See CLAUDE.md's R preprocessing "
-                 "section (and precompute_station_reach.py) for how they're "
+                 "station_pentad.parquet, station_reach.parquet and/or "
+                 "cell_rectangles.geojson not found next to this script. "
+                 "See CLAUDE.md's R preprocessing section (and "
+                 "precompute_station_reach.py / "
+                 "r-codes/Build_cell_rectangles_geojson.R) for how they're "
                  "built.")
         st.stop()
 
@@ -2590,6 +2669,7 @@ elif section == "Region Matching":
     grid = load_conus_grid(CONUS_GRID_PATH)
     station_pentad = load_station_pentad(STATION_PENTAD_PATH)
     station_reach = load_station_reach(STATION_REACH_PATH)
+    cell_rectangles = load_cell_rectangles(CELL_RECTANGLES_PATH)
     state_regions = grid.drop_duplicates("state")[["state", "region"]]
     state_weights = grid.groupby("state")["area_weight"].sum()
 
@@ -2610,21 +2690,24 @@ elif section == "Region Matching":
             reach_station = st.selectbox("Station", reach_stations, key="reach_station")
         with window_col:
             reach_window = st.selectbox(
-                "Window", rw.WINDOW_KEYS, key="reach_window",
+                "Destination cell window", rw.WINDOW_KEYS, key="reach_window",
                 format_func=lambda k: rw.DISPLAY_LABEL[k],
                 help=HINTS["rm_reach_window"])
+        reach_window_label = rw.DISPLAY_LABEL[reach_window]
 
         cell_sigma = station_reach[
             (station_reach["station"] == reach_station)
             & (station_reach["window"] == reach_window)
-        ]
-        n_offscale = int((cell_sigma["sigma"] > STATION_REACH_ZMAX).sum())
-        st.plotly_chart(station_reach_map(cell_sigma),
-                        width=W, config={"displayModeBar": False})
-        if n_offscale:
-            st.caption(f"{n_offscale} of {len(cell_sigma)} cells score above "
-                      f"{STATION_REACH_ZMAX:g}σ and show as the same solid red "
-                      "as the top of the scale.")
+        ].merge(grid[["lon", "lat", "state"]], on=["lon", "lat"], how="left")
+
+        n_top_bin = int((sigma_bin_index(cell_sigma["sigma"].to_numpy())
+                        == len(SIGMA_BIN_LABELS) - 1).sum())
+        st.plotly_chart(
+            station_reach_map(cell_sigma, cell_rectangles, reach_window_label),
+            width=W, config={"displayModeBar": False})
+        if n_top_bin:
+            st.caption(f"{n_top_bin} of {len(cell_sigma)} cells fall in the "
+                      f"{SIGMA_BIN_LABELS[-1]} bin.")
 
     with tab_advanced:
         with st.container(key="rm_block_reference"), \
