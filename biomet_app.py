@@ -1254,27 +1254,31 @@ def _circle_points(lat, lon, radius_km, n=72):
     return np.degrees(lat2), np.degrees(lon2)
 
 
-def zip_radius_map(zip_lat, zip_lon, radius_km, matched_cells, height=460):
-    """Task D's ZIP + radius counterpart to region_map(): the radius
-    halo (_circle_points()), the ZIP centroid, and the selected cells
-    highlighted in T["accent"] (Task C's same halo-outline treatment).
-    Draws even when matched_cells is empty, so a zero-cell radius still
-    shows exactly where the search looked and why nothing was close
-    enough, rather than an unexplained blank map.
+def zip_radius_map(cells, zip_lat, zip_lon, radius_km, matched_cells, height=460):
+    """Task D's ZIP + radius counterpart to region_map() -- reworked
+    (Task D follow-up) to be the SAME map, full CONUS, same backdrop and
+    same highlight styling, rather than a separately-zoomed local view:
+    the only thing that differs from region_map() is which cells count
+    as "selected" (inside the radius, instead of inside a region/state).
+    A first version zoomed to the local area (mercator + fitbounds, no
+    CONUS backdrop) and was rejected on sight -- the point of keeping
+    one consistent map is that switching Region <-> ZIP mode shouldn't
+    also change what kind of map the user is reading.
 
-    No CONUS cell backdrop here, unlike region_map(): fitbounds="locations"
-    zooms to the extent of this figure's own traces, and a national
-    35,000-point backdrop would pull that back out to the whole country,
-    defeating the point of a local map. mercator + fitbounds is
-    nc_map()'s own established pattern for a regional (not national)
-    view, for the same reason nc_map() itself gives -- scope="usa" locks
-    in the Albers USA projection, which does not zoom into an arbitrary
-    small area the way a plain projection with fitbounds does. State/
-    country borders come from Plotly's own base map layer (showsubunits,
-    showcountries) rather than a second Choropleth trace, since a
-    Choropleth's state polygons would themselves feed fitbounds and pull
-    the zoom back out the same way the cell backdrop would."""
+    Adds only the radius halo (_circle_points(), a spherical
+    destination-point circle using zip_radius.EARTH_RADIUS_KM so it
+    matches the exact radius cells were actually resolved against) and
+    an X at the ZIP centroid, both liked as-is from the first version
+    and kept unchanged. Draws even when matched_cells is empty, so a
+    zero-cell radius still shows exactly where the search looked and why
+    nothing was close enough, rather than an unexplained blank map."""
     fig = go.Figure()
+
+    # every cell, muted -- identical to region_map()'s own backdrop
+    fig.add_trace(go.Scattergeo(
+        lon=cells["lon"], lat=cells["lat"], mode="markers",
+        marker=dict(size=3, color=T["text"], opacity=.6),
+        hoverinfo="skip", showlegend=False))
 
     circle_lat, circle_lon = _circle_points(zip_lat, zip_lon, radius_km)
     fig.add_trace(go.Scattergeo(
@@ -1287,19 +1291,18 @@ def zip_radius_map(zip_lat, zip_lon, radius_km, matched_cells, height=460):
         marker=dict(size=9, symbol="x", color=T["text"]),
         hoverinfo="skip", showlegend=False))
 
+    # the cells within the radius highlighted -- identical styling to
+    # region_map()'s own selection highlight, just a different rule for
+    # which cells qualify (within radius_km, instead of within a region
+    # or a chosen set of states).
     if len(matched_cells):
         fig.add_trace(go.Scattergeo(
             lon=matched_cells["lon"], lat=matched_cells["lat"], mode="markers",
-            marker=dict(size=6, color=T["accent"],
+            marker=dict(size=4.5, color=T["accent"],
                         line=dict(color=T["bg"], width=.5)),
             hoverinfo="skip", showlegend=False))
 
-    fig.update_geos(
-        projection_type="mercator", fitbounds="locations",
-        showland=True, landcolor=T["panel"],
-        showsubunits=True, subunitcolor=T["line"], subunitwidth=1,
-        showcountries=True, countrycolor=T["line"],
-        bgcolor="rgba(0,0,0,0)")
+    fig.update_geos(scope="usa", bgcolor="rgba(0,0,0,0)")
     fig.update_layout(height=height, margin=dict(l=0, r=0, t=0, b=0),
                       paper_bgcolor="rgba(0,0,0,0)", showlegend=False)
     return fig
@@ -3153,7 +3156,7 @@ elif section == "Region Matching":
                             f"grid cell{'s' if rm_zip_report['n_cells'] != 1 else ''} "
                             f"across {n_states} state{'s' if n_states != 1 else ''}.")
                     st.plotly_chart(
-                        zip_radius_map(rm_zip_report["lat"], rm_zip_report["lon"],
+                        zip_radius_map(grid, rm_zip_report["lat"], rm_zip_report["lon"],
                                        rm_zip_radius, rm_zip_cells),
                         width=W, config={"displayModeBar": False})
 
