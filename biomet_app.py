@@ -64,19 +64,25 @@ STATION_COLORS = ["#E69F00", "#56B4E9", "#009E73",
 # choropleth if that turns out to matter in practice.
 USDA_REGION_COLORS = ["#D5C9E1", "#B3FFFF", "#E0DAC2", "#C5FFE4", "#FFB1A7"]
 
-# Station reach map (Task N+1): 7 discrete bins (0-1, 1-2, ..., 5-6, 6+
-# sigma), family changing exactly at 2 and 4 sigma -- two greens, two
-# ambers, two reds, one dark red/maroon for the open-ended top bin.
-# Relative luminance decreases monotonically bin 1 -> bin 7 (checked
-# numerically, not eyeballed: WCAG relative luminance 0.62, 0.46, 0.33,
-# 0.23, 0.15, 0.085, 0.03) so the sequence still reads as "worse and
-# worse" in greyscale, and survives red-green colour blindness, which
-# collapses the hue difference between the green and red families but
-# not this lightness gradient. Same 7 colours in both themes -- sigma
-# severity isn't a light/dark-mode concept -- kept under THEMES anyway,
-# not a standalone module constant, so a future theme swap has one
-# place to change it, the same reasoning region_colors already follows.
-SIGMA_RAMP_7 = ["#95E098", "#52CD58", "#C09530", "#C17029",
+# Station reach map (Task N+1, palette redone Task A): 7 discrete bins
+# (0-1, 1-2, ..., 5-6, 6+ sigma), family changing exactly at 2 and 4
+# sigma -- two greens, two ambers, two reds, one dark red/maroon for the
+# open-ended top bin. Bin 0 (0-1) is a proper mid-toned green rather
+# than a pale mint, and bin 1 (1-2) is yellow-green rather than a second
+# light green, so the ramp reads as an actual traffic light (green ->
+# yellow-green -> amber -> orange -> red -> dark red -> maroon) and the
+# white state-boundary line (Task N+1) stays visible against bin 0
+# instead of nearly disappearing into it. Relative luminance still
+# decreases monotonically bin 1 -> bin 7 (checked numerically, not
+# eyeballed: WCAG relative luminance 0.50, 0.40, 0.33, 0.23, 0.15,
+# 0.085, 0.03) so the sequence still reads as "worse and worse" in
+# greyscale, and survives red-green colour blindness, which collapses
+# the hue difference between the green and red families but not this
+# lightness gradient. Same 7 colours in both themes -- sigma severity
+# isn't a light/dark-mode concept -- kept under THEMES anyway, not a
+# standalone module constant, so a future theme swap has one place to
+# change it, the same reasoning region_colors already follows.
+SIGMA_RAMP_7 = ["#54D45F", "#80BA2F", "#C09530", "#C17029",
                "#C23D31", "#9A272A", "#591A24"]
 
 THEMES = {
@@ -865,12 +871,12 @@ def nc_map(active, height=330):
 # THEMES and VARS. No em dashes: this is UI text, not code comments.
 HINTS = {
     "rm_reach_block":
-        "How far this station's climate reaches: every grid cell coloured "
-        "by how many station-interannual standard deviations its own "
-        "typical conditions sit from the station's, over the six default "
-        "variables together (composite sigma dissimilarity, Mahony et al. "
-        "2017). Fixed variable set -- Advanced search lets you change it "
-        "and see each variable on its own.",
+        "How far this station's climate reaches. This is a similarity "
+        "index: each grid cell is coloured by how different its climate "
+        "is from the station, measured in units of the station's "
+        "year-to-year variation. Combines six variables (mean "
+        "temperature, diurnal temperature range, day-to-day temperature "
+        "change, dew point, precipitation, days THI ≥ 79).",
     "rm_reach_window":
         "Applies to the destination cell -- every coloured cell is "
         "compared over this same window. The station side is fitted: for "
@@ -1167,7 +1173,7 @@ def station_reach_map(cell_sigma, cell_geojson, cell_window_label, height=560):
         height=height, margin=dict(l=0, r=0, t=0, b=0),
         paper_bgcolor="rgba(0,0,0,0)", font=dict(color=T["text"]),
         legend=dict(orientation="v", yanchor="middle", y=0.5,
-                    xanchor="left", x=0.01, title=dict(text="σ")))
+                    xanchor="left", x=0.01, title=dict(text="Sigma similarity")))
     return fig
 
 
@@ -2683,6 +2689,7 @@ elif section == "Region Matching":
 
     with tab_reach:
         st.caption(HINTS["rm_reach_block"])
+        st.caption("All values computed from MERRA-2, 1991-2025.")
 
         reach_stations = sorted(station_reach["station"].unique())
         reach_col, window_col = st.columns(2)
@@ -2700,14 +2707,9 @@ elif section == "Region Matching":
             & (station_reach["window"] == reach_window)
         ].merge(grid[["lon", "lat", "state"]], on=["lon", "lat"], how="left")
 
-        n_top_bin = int((sigma_bin_index(cell_sigma["sigma"].to_numpy())
-                        == len(SIGMA_BIN_LABELS) - 1).sum())
         st.plotly_chart(
             station_reach_map(cell_sigma, cell_rectangles, reach_window_label),
             width=W, config={"displayModeBar": False})
-        if n_top_bin:
-            st.caption(f"{n_top_bin} of {len(cell_sigma)} cells fall in the "
-                      f"{SIGMA_BIN_LABELS[-1]} bin.")
 
     with tab_advanced:
         with st.container(key="rm_block_reference"), \
