@@ -3453,13 +3453,19 @@ elif section == "Region Matching":
                     # the two branches above -- see HINTS["rm_boxplots"].
                     st.caption(HINTS["rm_boxplots"])
                     n_rows = (len(ordered_vars) + BOXPLOT_COLS - 1) // BOXPLOT_COLS
-                    box_fig, box_table = region_station_boxplots(
+                    box_fig, _ = region_station_boxplots(
                         ordered_vars, region_py, station_pentad, radar_stations,
                         station_windows, p_lo, win_pentads, win_days, y_lo, y_hi,
                         metric, auto)
-                    chart_or_table(box_fig, box_table, key="rm_boxplots_view",
-                                   filename="region_station_boxplots.csv",
-                                   height=260 * n_rows)
+                    # Chart only, no chart_or_table() toggle -- Table/Download
+                    # dropped along with it, not just hidden -- and no
+                    # legend: region vs. station is already carried by each
+                    # box's own colour and x-axis label, and the boxes sit
+                    # too close together at BOXPLOT_COLS width for a legend
+                    # to have room without crowding them.
+                    box_fig.update_layout(showlegend=False)
+                    st.plotly_chart(style_fig(box_fig, T, 260 * n_rows),
+                                    width=W, key="rm_boxplots_fig")
 
 
 # "Data" is hidden from NAV (Region Matching took its slot) but this branch
