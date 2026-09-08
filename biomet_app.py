@@ -970,6 +970,42 @@ def _set_rm_window_annual():
         st.session_state.rm_window = (date(2001, 1, 1), date(2001, 12, 31))
 
 
+# Station reach tab (Task B): window length ("12mo"/"3mo"/"6mo"/"9mo",
+# region_windows.LENGTHS' own keys) plus the time-window dropdown that
+# lists just that length's four quarter-start candidates
+# (region_windows.CANDIDATES_BY_LENGTH). Labels here, not in
+# region_windows.py itself, since that module is also imported by the
+# standalone precompute script and has no UI vocabulary of its own.
+RM_REACH_LENGTHS = ["12mo", "3mo", "6mo", "9mo"]
+RM_REACH_LENGTH_LABELS = {"12mo": "Annual", "3mo": "3 months",
+                         "6mo": "6 months", "9mo": "9 months"}
+
+
+def _set_reach_length_window():
+    """on_change for the window-length control -- same timing rule as
+    _set_rm_window_annual() above: write reach_window's session_state
+    here, before the time-window selectbox's own line executes later in
+    this rerun. Without this, switching length would leave reach_window
+    holding a key from the OLD length's candidates, which is not in the
+    new selectbox's options and would error rather than silently
+    resetting (unlike select_slider's own silent-reset-to-first-option
+    behaviour, documented elsewhere in this file for a different
+    control)."""
+    length = st.session_state.reach_length
+    st.session_state.reach_window = rw.CANDIDATES_BY_LENGTH[length][0]
+
+
+def _step_reach_window(delta):
+    """on_click for the time-window's step buttons -- same timing rule:
+    write session_state here, before the selectbox re-renders this run.
+    Wraps within the CURRENT length's own candidates only, so a step
+    can never land on a window of a different length."""
+    candidates = rw.CANDIDATES_BY_LENGTH[st.session_state.reach_length]
+    cur = st.session_state.reach_window
+    idx = candidates.index(cur) if cur in candidates else 0
+    st.session_state.reach_window = candidates[(idx + delta) % len(candidates)]
+
+
 def _set_state_selection(states_key, value):
     """Runs as an on_click callback for the Select all/Clear all buttons,
     before the multiselect widget redraws (same timing constraint
@@ -1174,6 +1210,38 @@ def station_reach_map(cell_sigma, cell_geojson, cell_window_label, height=560):
         paper_bgcolor="rgba(0,0,0,0)", font=dict(color=T["text"]),
         legend=dict(orientation="v", yanchor="middle", y=0.5,
                     xanchor="left", x=0.01, title=dict(text="Sigma similarity")))
+    return fig
+
+
+def sigma_bin_bar_chart(cell_sigma, height=560):
+    """Beside the station reach map (Task B): what share of the 2863
+    cells falls in each of the 7 sigma bins, for the same station and
+    window the map is already showing. Seven separate horizontal bars,
+    not one stacked bar -- a stacked bar makes every bin after the first
+    hard to compare since none of them share a common baseline; seven
+    separate bars all start at zero. Same SIGMA_BIN_LABELS order and
+    same THEMES["sigma_ramp"] colours as the map's own legend, so this
+    reads as a plain expansion of that legend, not a second colour
+    scheme to learn. Composite only -- there is only one quantity to
+    show a distribution of until the per-variable view exists."""
+    bin_idx = sigma_bin_index(cell_sigma["sigma"].to_numpy())
+    n = len(cell_sigma)
+    pct = [100 * int((bin_idx == b).sum()) / n if n else 0
+          for b in range(len(SIGMA_BIN_LABELS))]
+    ramp = T["sigma_ramp"]
+
+    fig = go.Figure(go.Bar(
+        x=pct, y=SIGMA_BIN_LABELS, orientation="h", marker_color=ramp,
+        text=[f"{p:.1f}%" for p in pct], textposition="outside",
+        hovertemplate="%{y}: %{x:.1f}%<extra></extra>"))
+    fig.update_yaxes(categoryorder="array", categoryarray=SIGMA_BIN_LABELS,
+                     autorange="reversed", gridcolor=T["line"])
+    fig.update_xaxes(title="% of cells", range=[0, max(max(pct), 1) * 1.2],
+                     gridcolor=T["line"])
+    fig.update_layout(
+        height=height, showlegend=False,
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color=T["text"]), margin=dict(l=10, r=30, t=10, b=10))
     return fig
 
 
@@ -2691,15 +2759,56 @@ elif section == "Region Matching":
         st.caption(HINTS["rm_reach_block"])
         st.caption("All values computed from MERRA-2, 1991-2025.")
 
+        # Station: a horizontal button row, same pattern as Overview's
+        # own station picker (ov_section_station) -- primary/secondary
+        # styling for the active one, on_click + st.rerun() rather than
+        # a selectbox.
         reach_stations = sorted(station_reach["station"].unique())
-        reach_col, window_col = st.columns(2)
-        with reach_col:
-            reach_station = st.selectbox("Station", reach_stations, key="reach_station")
+        st.session_state.setdefault("reach_station", reach_stations[0])
+        station_cols = st.columns(len(reach_stations))
+        for i, stn in enumerate(reach_stations):
+            if station_cols[i].button(
+                    stn, key=f"reach_btn_{stn}", width=W,
+                    type="primary" if st.session_state.reach_station == stn
+                    else "secondary"):
+                st.session_state.reach_station = stn
+                st.rerun()
+        reach_station = st.session_state.reach_station
+
+        st.session_state.setdefault("reach_length", RM_REACH_LENGTHS[0])
+        st.session_state.setdefault(
+            "reach_window", rw.CANDIDATES_BY_LENGTH[st.session_state.reach_length][0])
+
+        length_col, window_col, var_col = st.columns(3)
+        with length_col:
+            st.segmented_control(
+                "Window length", RM_REACH_LENGTHS, key="reach_length",
+                format_func=lambda k: RM_REACH_LENGTH_LABELS[k],
+                on_change=_set_reach_length_window)
+
+        is_annual = st.session_state.reach_length == "12mo"
+        window_candidates = rw.CANDIDATES_BY_LENGTH[st.session_state.reach_length]
         with window_col:
-            reach_window = st.selectbox(
-                "Destination cell window", rw.WINDOW_KEYS, key="reach_window",
-                format_func=lambda k: rw.DISPLAY_LABEL[k],
-                help=HINTS["rm_reach_window"])
+            st.caption("Time window")
+            prev_col, dd_col, next_col = st.columns([1, 4, 1])
+            prev_col.button("◀", key="reach_window_prev", disabled=is_annual,
+                            on_click=_step_reach_window, args=(-1,))
+            with dd_col:
+                st.selectbox(
+                    "Time window", window_candidates, key="reach_window",
+                    format_func=lambda k: rw.DISPLAY_LABEL[k],
+                    disabled=is_annual, label_visibility="collapsed",
+                    help=HINTS["rm_reach_window"])
+            next_col.button("▶", key="reach_window_next", disabled=is_annual,
+                            on_click=_step_reach_window, args=(1,))
+
+        with var_col:
+            # Composite only for now -- the control stays in place so
+            # per-variable options (a later task) slot into the same
+            # spot rather than needing a new one added.
+            st.selectbox("Variable", ["Composite sigma similarity"], key="reach_variable")
+
+        reach_window = st.session_state.reach_window
         reach_window_label = rw.DISPLAY_LABEL[reach_window]
 
         cell_sigma = station_reach[
@@ -2707,9 +2816,17 @@ elif section == "Region Matching":
             & (station_reach["window"] == reach_window)
         ].merge(grid[["lon", "lat", "state"]], on=["lon", "lat"], how="left")
 
-        st.plotly_chart(
-            station_reach_map(cell_sigma, cell_rectangles, reach_window_label),
-            width=W, config={"displayModeBar": False})
+        # Map shifted slightly left of centre by sharing the row with
+        # the bin-share bar chart to its right, rather than the map's
+        # own former full-width column.
+        map_col, bar_col = st.columns([3, 1], gap="medium")
+        with map_col:
+            st.plotly_chart(
+                station_reach_map(cell_sigma, cell_rectangles, reach_window_label),
+                width=W, config={"displayModeBar": False})
+        with bar_col:
+            st.plotly_chart(sigma_bin_bar_chart(cell_sigma), width=W,
+                            config={"displayModeBar": False})
 
     with tab_advanced:
         with st.container(key="rm_block_reference"), \
