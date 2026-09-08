@@ -943,12 +943,13 @@ def nc_map(active, height=330):
 # THEMES and VARS. No em dashes: this is UI text, not code comments.
 HINTS = {
     "rm_reach_block":
-        "How far this station's climate reaches. This is a similarity "
+        "How far this station's climate reaches. This is a dissimilarity "
         "index: each grid cell is coloured by how different its climate "
-        "is from the station, measured in units of the station's "
-        "year-to-year variation. Combines six variables (mean "
-        "temperature, diurnal temperature range, day-to-day temperature "
-        "change, dew point, precipitation, days THI ≥ 79).",
+        "is from the station (larger sigma means more different; under "
+        "2 sigma is generally a representative match), measured in units "
+        "of the station's year-to-year variation. Combines six variables "
+        "(mean temperature, diurnal temperature range, day-to-day "
+        "temperature change, dew point, precipitation, days THI ≥ 79).",
     "rm_reach_window":
         "This window applies to every coloured cell on the map. The "
         "station's own window is picked automatically: the app tries "
@@ -1056,6 +1057,12 @@ RM_REACH_LENGTHS = ["12mo", "3mo", "6mo", "9mo"]
 RM_REACH_LENGTH_LABELS = {"12mo": "Annual", "3mo": "3 months",
                          "6mo": "6 months", "9mo": "9 months"}
 
+# The Variable selectbox's only option today (composite only -- see its
+# call site). Named so the caption below it can check against the same
+# string rather than a literal repeated at both places, and so a later
+# task adding per-variable options has one constant to compare against.
+RM_REACH_COMPOSITE_LABEL = "Composite sigma dissimilarity"
+
 
 def _set_reach_length_window():
     """on_change for the window-length control -- same timing rule as
@@ -1162,18 +1169,30 @@ def month_scale(highlight=None, extra_days=0):
         unsafe_allow_html=True)
 
 
-def region_map(state_regions, cells, active_region, active_states, height=460):
-    """CONUS states filled by USDA-ARS region, with every grid cell drawn
-    on top as a fixed backdrop and the current selection highlighted.
-    scope="usa": nc_map()'s Mercator choice is to avoid tilting North
-    Carolina at that latitude; at the full-country scale Albers (what
-    scope="usa" gives Plotly) is the projection that's actually correct.
+def _conus_region_base_map(state_regions, cells):
+    """The shared base layer behind BOTH region_map() and
+    zip_radius_map() (follow-up request): five USDA-ARS region fills, at
+    the SAME fixed opacity always -- no per-region dimming, so this is
+    the literal same figure regardless of which mode's toggle is active,
+    before that mode's own selection is drawn on top of it -- with a
+    categorical legend naming the five regions (showlegend=True; neither
+    map had one before), muted grid-cell points, and state boundaries in
+    T["muted"] (see region_map()'s own history below for why that
+    specific colour).
 
-    Contrast between the three layers (Task C, then a follow-up): checked
-    live against a running instance both times. State boundaries were
-    first marker_line_color=T["bg"] -- literally the page background
-    colour, so a state's border against another state IN THE SAME REGION
-    (same fill) was invisible, and only the seam BETWEEN two different-
+    Selection used to be shown by brightening the ACTIVE region's own
+    colour (marker_opacity=1.0 vs .25 for the rest) -- replaced (this
+    request) with a translucent red overlay each caller draws for
+    itself, the same colour/alpha as the ZIP-radius halo, so a selection
+    reads the same regardless of whether a region, a set of states, or a
+    ZIP + radius produced it, instead of each region announcing its own
+    selection in a different colour.
+
+    Contrast between the layers (Task C, then a follow-up): checked live
+    against a running instance both times. State boundaries were first
+    marker_line_color=T["bg"] -- literally the page background colour,
+    so a state's border against another state IN THE SAME REGION (same
+    fill) was invisible, and only the seam BETWEEN two different-
     coloured regions read as a line at all, by accident of the two fills
     differing rather than the line itself being visible. Moved to
     T["line"] (the same subtle gridline grey every chart in this file
@@ -1192,12 +1211,7 @@ def region_map(state_regions, cells, active_region, active_states, height=460):
     disappeared into the similarly pale USDA_REGION_COLORS pastels;
     darkened to T["text"] at 0.6 opacity so the dots read as a distinct
     layer against any of the five fills, not just the ones with more
-    value contrast against grey. The selection highlight (T["accent"])
-    already had good hue contrast on its own; added a thin T["bg"] halo
-    (marker line) so it stays crisp against Southeast's own salmon fill
-    specifically, the one USDA_REGION_COLORS tone close enough to the
-    accent's hue that the dots could blur into it.
-    """
+    value contrast against grey."""
     region_colors = dict(zip(REGIONS, T["region_colors"]))
 
     fig = go.Figure()
@@ -1210,22 +1224,41 @@ def region_map(state_regions, cells, active_region, active_states, height=460):
             z=[1] * len(sub), locationmode="USA-states",
             colorscale=[[0, c], [1, c]], showscale=False,
             marker_line_color=T["muted"], marker_line_width=1,
-            marker_opacity=1.0 if reg == active_region else .25,
             text=sub["state"], hovertemplate="%{text}<extra></extra>",
-            name=reg, showlegend=False))
+            name=reg, showlegend=True))
 
     # every cell, muted, so the map reads the same regardless of selection
     fig.add_trace(go.Scattergeo(
         lon=cells["lon"], lat=cells["lat"], mode="markers",
         marker=dict(size=3, color=T["text"], opacity=.6),
         hoverinfo="skip", showlegend=False))
+    return fig
 
-    # the current selection highlighted on top: selected states if any,
-    # else the whole active region
-    if active_states:
-        hi = cells[cells["state"].isin(active_states)]
-    else:
-        hi = cells[cells["region"] == active_region]
+
+def region_map(state_regions, cells, active_region, active_states, height=460):
+    """CONUS states filled by USDA-ARS region (_conus_region_base_map(),
+    shared with zip_radius_map()), with the current selection -- selected
+    states if any, else the whole active region -- drawn on top as a
+    translucent red area (the same T["accent"] tint and 0.25 alpha
+    zip_radius_map()'s own halo uses, not the active region's own colour
+    at higher opacity: see _conus_region_base_map()'s own docstring for
+    why) plus highlighted points. scope="usa": nc_map()'s Mercator choice
+    is to avoid tilting North Carolina at that latitude; at the
+    full-country scale Albers (what scope="usa" gives Plotly) is the
+    projection that's actually correct."""
+    fig = _conus_region_base_map(state_regions, cells)
+
+    sel_states = active_states if active_states else sorted(
+        state_regions.loc[state_regions["region"] == active_region, "state"])
+    hi = cells[cells["state"].isin(sel_states)]
+
+    sel_rgba = _hex_to_rgba(T["accent"], 0.25)
+    fig.add_trace(go.Choropleth(
+        locations=[STATE_ABBR[s] for s in sel_states],
+        z=[1] * len(sel_states), locationmode="USA-states",
+        colorscale=[[0, sel_rgba], [1, sel_rgba]], showscale=False,
+        marker_line_width=0, hoverinfo="skip", showlegend=False))
+
     fig.add_trace(go.Scattergeo(
         lon=hi["lon"], lat=hi["lat"], mode="markers",
         marker=dict(size=4.5, color=T["accent"],
@@ -1234,7 +1267,7 @@ def region_map(state_regions, cells, active_region, active_states, height=460):
 
     fig.update_geos(scope="usa", bgcolor="rgba(0,0,0,0)")
     fig.update_layout(height=height, margin=dict(l=0, r=0, t=0, b=0),
-                      paper_bgcolor="rgba(0,0,0,0)", showlegend=False)
+                      paper_bgcolor="rgba(0,0,0,0)")
     return fig
 
 
@@ -1275,36 +1308,23 @@ def zip_radius_map(state_regions, cells, zip_lat=None, zip_lon=None, radius_km=N
     appearing once a search succeeds and disappearing/reappearing on
     every keystroke or radius change.
 
-    When a ZIP has resolved: the radius circle is now a filled halo (a
+    Base layer is now literally the same function call region_map() uses
+    (_conus_region_base_map()) -- both maps are built from one shared
+    base, so the map before any selection reads identically regardless
+    of which toggle is active, per the user's own explicit requirement.
+
+    When a ZIP has resolved: the radius circle is a filled halo (a
     closed ring, fill="toself", translucent T["accent"]) with a SOLID
     outline rather than a dotted one, an explicit visible area rather
-    than only a thin line. The X centroid marker is unchanged. Cells
-    within the radius are highlighted in T["accent"], the same styling
-    region_map() gives its own selection -- drawn last so they sit above
-    both the halo fill and the muted backdrop. Draws the halo even when
-    matched_cells is empty, so a zero-cell radius still shows exactly
-    where the search looked and why nothing was close enough, rather
-    than an unexplained blank map."""
-    region_colors = dict(zip(REGIONS, T["region_colors"]))
-
-    fig = go.Figure()
-
-    for reg in REGIONS:
-        sub = state_regions[state_regions["region"] == reg]
-        c = region_colors[reg]
-        fig.add_trace(go.Choropleth(
-            locations=[STATE_ABBR[s] for s in sub["state"]],
-            z=[1] * len(sub), locationmode="USA-states",
-            colorscale=[[0, c], [1, c]], showscale=False,
-            marker_line_color=T["muted"], marker_line_width=1,
-            text=sub["state"], hovertemplate="%{text}<extra></extra>",
-            name=reg, showlegend=False))
-
-    # every cell, muted -- identical to region_map()'s own backdrop
-    fig.add_trace(go.Scattergeo(
-        lon=cells["lon"], lat=cells["lat"], mode="markers",
-        marker=dict(size=3, color=T["text"], opacity=.6),
-        hoverinfo="skip", showlegend=False))
+    than only a thin line -- the same tint region_map() now uses for ITS
+    OWN selection overlay, so a selection reads the same red regardless
+    of which mode produced it. The X centroid marker is unchanged. Cells
+    within the radius are highlighted in T["accent"], drawn last so they
+    sit above both the halo fill and the muted backdrop. Draws the halo
+    even when matched_cells is empty, so a zero-cell radius still shows
+    exactly where the search looked and why nothing was close enough,
+    rather than an unexplained blank map."""
+    fig = _conus_region_base_map(state_regions, cells)
 
     if zip_lat is not None and zip_lon is not None and radius_km is not None:
         circle_lat, circle_lon = _circle_points(zip_lat, zip_lon, radius_km)
@@ -1332,7 +1352,7 @@ def zip_radius_map(state_regions, cells, zip_lat=None, zip_lon=None, radius_km=N
 
     fig.update_geos(scope="usa", bgcolor="rgba(0,0,0,0)")
     fig.update_layout(height=height, margin=dict(l=0, r=0, t=0, b=0),
-                      paper_bgcolor="rgba(0,0,0,0)", showlegend=False)
+                      paper_bgcolor="rgba(0,0,0,0)")
     return fig
 
 
@@ -1417,7 +1437,7 @@ def station_reach_map(cell_sigma, cell_geojson, cell_window_label, height=560):
         height=height, margin=dict(l=0, r=0, t=0, b=0),
         paper_bgcolor="rgba(0,0,0,0)", font=dict(color=T["text"]),
         legend=dict(orientation="v", yanchor="middle", y=0.5,
-                    xanchor="left", x=0.01, title=dict(text="Sigma similarity")))
+                    xanchor="left", x=0.01, title=dict(text="Sigma dissimilarity")))
     return fig
 
 
@@ -1444,7 +1464,7 @@ def sigma_bin_bar_chart(cell_sigma, height=560):
         hovertemplate="%{y}: %{x:.1f}%<extra></extra>"))
     fig.update_yaxes(categoryorder="array", categoryarray=SIGMA_BIN_LABELS,
                      autorange="reversed", gridcolor=T["line"])
-    fig.update_xaxes(title="% of cells", range=[0, max(max(pct), 1) * 1.2],
+    fig.update_xaxes(title="% of grid cells", range=[0, max(max(pct), 1) * 1.2],
                      gridcolor=T["line"])
     fig.update_layout(
         height=height, showlegend=False,
@@ -3012,9 +3032,6 @@ elif section == "Region Matching":
     tab_reach, tab_advanced = st.tabs(["Station reach", "Advanced search"])
 
     with tab_reach:
-        st.caption(HINTS["rm_reach_block"])
-        st.caption("All values computed from MERRA-2, 1991-2025.")
-
         # Station: a horizontal button row, same pattern as Overview's
         # own station picker (ov_section_station) -- primary/secondary
         # styling for the active one, on_click + st.rerun() rather than
@@ -3078,7 +3095,17 @@ elif section == "Region Matching":
             # Composite only for now -- the control stays in place so
             # per-variable options (a later task) slot into the same
             # spot rather than needing a new one added.
-            st.selectbox("Variable", ["Composite sigma similarity"], key="reach_variable")
+            st.selectbox("Variable", [RM_REACH_COMPOSITE_LABEL], key="reach_variable")
+        reach_variable = st.session_state.reach_variable
+
+        # Explanation sits below the filters, not above them -- read
+        # after picking, not before -- and only when the composite index
+        # is actually selected: forward-looking for per-variable options
+        # (a later task), which will need their own text instead of this
+        # one always showing regardless of what's picked.
+        if reach_variable == RM_REACH_COMPOSITE_LABEL:
+            st.caption(HINTS["rm_reach_block"])
+        st.caption("All values computed from MERRA-2, 1991-2025.")
 
         reach_window = st.session_state.reach_window
         reach_window_label = rw.DISPLAY_LABEL[reach_window]
