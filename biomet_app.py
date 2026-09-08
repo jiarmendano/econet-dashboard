@@ -361,12 +361,28 @@ def inject_css(t):
          to the time-window and variable selectboxes: BaseWeb renders a
          segmented control shorter than a selectbox's own input box, so
          the row started level with the other two but didn't match their
-         height. Stretched to a selectbox's typical height so all three
-         controls read as one row, not two different widget styles.
-         Best effort, unverified in a browser this session. */
-      .st-key-reach_length_ctrl div[data-testid="stSegmentedControl"],
+         height. min-height alone on the outer div left the pills their
+         normal (shorter) size with dead space around them, since a
+         min-height on a flex parent doesn't stretch its children unless
+         told to -- align-items:stretch plus a matching min-height on the
+         label itself is what actually grows the pills. Best effort,
+         unverified in a browser this session. */
+      .st-key-reach_length_ctrl div[data-testid="stSegmentedControl"] {{
+          min-height:2.9rem; }}
+      .st-key-reach_length_ctrl div[data-testid="stSegmentedControl"] > div {{
+          align-items:stretch; height:100%; }}
       .st-key-reach_length_ctrl div[data-testid="stSegmentedControl"] label {{
-          min-height:2.5rem; }}
+          min-height:2.9rem; display:flex; align-items:center; justify-content:center; }}
+
+      /* The left step button's own column left-aligns it by default,
+         same as the right button's -- but the left button's column sits
+         BEFORE the dropdown, so left-aligning puts empty space between
+         the button and the box instead of against it. Right-aligning
+         only this one button closes that gap without touching the right
+         button, which is already flush the way a left-aligned button
+         is meant to be. */
+      .st-key-reach_window_prev_ctrl {{
+          display:flex; justify-content:flex-end; }}
 
       /* Units and Theme, pinned top-left just outside the sidebar (300px
          is Streamlit's default sidebar width; if the sidebar is dragged
@@ -889,7 +905,7 @@ HINTS = {
         "temperature, diurnal temperature range, day-to-day temperature "
         "change, dew point, precipitation, days THI ≥ 79).",
     "rm_reach_window":
-        "Applies to the destination cell -- every coloured cell is "
+        "Applies to the destination cell. Every coloured cell is "
         "compared over this same window. The station side is fitted: for "
         "each cell, the station's own window is searched over the four "
         "quarter starts of the same length and the best (lowest-sigma) "
@@ -2815,7 +2831,13 @@ elif section == "Region Matching":
             # Bottom-aligning puts both buttons flush with the box itself
             # instead.
             prev_col, dd_col, next_col = st.columns([1, 4, 1], vertical_alignment="bottom")
-            with prev_col:
+            with prev_col, st.container(key="reach_window_prev_ctrl"):
+                # Right-aligned (CSS, inject_css()): a button's own
+                # column otherwise left-aligns it, which put empty space
+                # BETWEEN this button and the dropdown while the next
+                # button (already at its column's left edge) sat flush
+                # against the dropdown's other side -- the two arrows
+                # read at different distances from the box.
                 st.button("◀", key="reach_window_prev", disabled=is_annual,
                          on_click=_step_reach_window, args=(-1,))
             with dd_col:
