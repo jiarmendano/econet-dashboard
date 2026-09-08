@@ -2789,18 +2789,29 @@ elif section == "Region Matching":
         is_annual = st.session_state.reach_length == "12mo"
         window_candidates = rw.CANDIDATES_BY_LENGTH[st.session_state.reach_length]
         with window_col:
-            st.caption("Time window")
+            # The selectbox carries its own visible label ("Time window")
+            # rather than a separate st.caption above the row: a caption
+            # and a widget's native label render at different heights, so
+            # the row started lower than length_col's/var_col's own
+            # widget-labelled controls. The buttons have no label of
+            # their own to match that height with, so an empty
+            # st.write("") stands in for one -- same fix, the same
+            # "nothing above the button" gap that would otherwise leave
+            # them sitting higher than the dropdown beside them.
             prev_col, dd_col, next_col = st.columns([1, 4, 1])
-            prev_col.button("◀", key="reach_window_prev", disabled=is_annual,
-                            on_click=_step_reach_window, args=(-1,))
+            with prev_col:
+                st.write("")
+                st.button("◀", key="reach_window_prev", disabled=is_annual,
+                         on_click=_step_reach_window, args=(-1,))
             with dd_col:
                 st.selectbox(
                     "Time window", window_candidates, key="reach_window",
                     format_func=lambda k: rw.DISPLAY_LABEL[k],
-                    disabled=is_annual, label_visibility="collapsed",
-                    help=HINTS["rm_reach_window"])
-            next_col.button("▶", key="reach_window_next", disabled=is_annual,
-                            on_click=_step_reach_window, args=(1,))
+                    disabled=is_annual, help=HINTS["rm_reach_window"])
+            with next_col:
+                st.write("")
+                st.button("▶", key="reach_window_next", disabled=is_annual,
+                         on_click=_step_reach_window, args=(1,))
 
         with var_col:
             # Composite only for now -- the control stays in place so
