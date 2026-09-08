@@ -45,10 +45,18 @@ quarter-start grid (region_windows.CANDIDATES_BY_LENGTH) and the best
 (lowest) sigma is kept -- computed independently per CELL, since which
 candidate window fits best can genuinely differ across the country for
 the same station. The winning candidate is stored as `station_window`
-even though the tab itself never displays it: a later per-variable
-view needs the six departures computed from the one alignment that
-produced this sigma, and re-deriving that argmin from scratch would
-mean rerunning this entire precompute a second time.
+(as a display-ready label, e.g. "Apr-Jun", not the internal key) even
+though the tab itself never displays it: a later per-variable view
+needs the six departures computed from the one alignment that produced
+this sigma, and re-deriving that argmin from scratch would mean
+rerunning this entire precompute a second time.
+
+`sigma_same_window` is the sigma for the candidate whose window equals
+the CELL's own region window (region_key) -- already one row of the
+same sigma matrix the argmin is taken over, so a store, not a second
+computation. Coincides with `sigma` exactly for the Annual window,
+where "Annual" is its own and only candidate. Never lower than `sigma`
+elsewhere, since `sigma` is a min over the same candidates.
 """
 import glob
 import os
@@ -186,11 +194,12 @@ def main():
     lon_arr = cells["lon"].to_numpy()
     lat_arr = cells["lat"].to_numpy()
 
-    out_lon, out_lat, out_station, out_window, out_station_window, out_sigma = (
-        [], [], [], [], [], [])
+    (out_lon, out_lat, out_station, out_window, out_station_window,
+    out_sigma, out_sigma_same_window) = ([], [], [], [], [], [], [])
 
     for region_key, lk, _ in rw.WINDOWS:
         candidates = rw.CANDIDATES_BY_LENGTH[lk]
+        same_idx = candidates.index(region_key)   # region_key is always its own length's own candidate
         cell_means = cell_window_mean[region_key]
 
         for station in stations:
@@ -209,13 +218,21 @@ def main():
 
             best_idx = np.argmin(sigmas, axis=0)
             best_sigma = sigmas[best_idx, np.arange(n_cells)]
+            # Same candidate the region window itself sits at -- already
+            # one of the rows in `sigmas`, so this is a store, not a new
+            # computation. For Annual there is only one candidate
+            # ("Annual" itself), so same_idx == best_idx always and the
+            # two sigma columns coincide by construction.
+            same_window_sigma = sigmas[same_idx]
 
             out_lon.append(lon_arr)
             out_lat.append(lat_arr)
             out_station.append(np.full(n_cells, station, dtype=object))
             out_window.append(np.full(n_cells, region_key, dtype=object))
-            out_station_window.append(np.array([candidates[i] for i in best_idx], dtype=object))
+            out_station_window.append(
+                np.array([rw.DISPLAY_LABEL[candidates[i]] for i in best_idx], dtype=object))
             out_sigma.append(best_sigma)
+            out_sigma_same_window.append(same_window_sigma)
 
     out = pd.DataFrame({
         "lon": np.concatenate(out_lon),
@@ -224,14 +241,19 @@ def main():
         "window": np.concatenate(out_window),
         "station_window": np.concatenate(out_station_window),
         "sigma": np.concatenate(out_sigma),
+        "sigma_same_window": np.concatenate(out_sigma_same_window),
     })
     print(f"final table assembled: {len(out)} rows, {time.perf_counter()-t0:.2f}s")
+
+    n_viol = int((out["sigma_same_window"] < out["sigma"] - 1e-6).sum())
+    print(f"sigma_same_window < sigma (stored best) violations: {n_viol} (expect 0)")
 
     for c in ["station", "window", "station_window"]:
         out[c] = out[c].astype("category")
     out["lon"] = out["lon"].astype("float32")
     out["lat"] = out["lat"].astype("float32")
     out["sigma"] = out["sigma"].astype("float32")
+    out["sigma_same_window"] = out["sigma_same_window"].astype("float32")
 
     t0 = time.perf_counter()
     out.to_parquet(OUT_PATH, index=False)
