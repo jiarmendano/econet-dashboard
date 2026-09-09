@@ -1413,7 +1413,8 @@ def _filter_geojson(cell_geojson, cell_ids):
     }
 
 
-def station_reach_map(cell_sigma, cell_geojson, cell_window_label, is_annual, height=560):
+def station_reach_map(cell_sigma, cell_geojson, cell_window_label, is_annual,
+                      state_line_blend=0.3, height=560):
     """Every grid cell, coloured by its own composite sigma dissimilarity
     against one station in one window (station_reach.parquet, already
     filtered to that one station/window, joined to conus_grid.parquet
@@ -1475,16 +1476,20 @@ def station_reach_map(cell_sigma, cell_geojson, cell_window_label, is_annual, he
     # but reverted -- too dark to read against the ramp's own darkest
     # bins (near-black maroon). Plain T["line"] alone then read too
     # light against the ramp's own palest bins instead. _blend_hex()
-    # nudges T["line"] a little way toward T["muted"] (t=0.3, "slightly
-    # darker" per the request) rather than picking either extreme
-    # outright. Plotly's Choropleth marker.line has no dash option at
-    # all (only colour and width), so a dashed state border was never
-    # on the table either way.
+    # nudges T["line"] a little way toward T["muted"] rather than
+    # picking either extreme outright -- state_line_blend (default 0.3,
+    # "slightly darker" per the request that set it) is a parameter, not
+    # a literal, because station_reach_variable_map()'s own diverging
+    # red/blue scale needs a different, darker value here: it washes
+    # out through its pale middle at this map's own 0.3. Plotly's
+    # Choropleth marker.line has no dash option at all (only colour and
+    # width), so a dashed state border was never on the table either way.
     fig.add_trace(go.Choropleth(
         locations=list(STATE_ABBR.values()), locationmode="USA-states",
         z=[1] * len(STATE_ABBR),
         colorscale=[[0, "rgba(0,0,0,0)"], [1, "rgba(0,0,0,0)"]],
-        showscale=False, marker_line_color=_blend_hex(T["line"], T["muted"], 0.3),
+        showscale=False,
+        marker_line_color=_blend_hex(T["line"], T["muted"], state_line_blend),
         marker_line_width=1, hoverinfo="skip", showlegend=False))
 
     # Domain shifted right of the legend's own column (x=0.01), the same
@@ -1501,7 +1506,8 @@ def station_reach_map(cell_sigma, cell_geojson, cell_window_label, is_annual, he
 
 
 def station_reach_variable_map(cell_sigma, cell_geojson, cell_window_label, dep_native,
-                               var_label, kind, metric, is_annual, height=560):
+                               var_label, kind, metric, is_annual,
+                               state_line_blend=0.55, height=560):
     """Task F's per-variable counterpart to station_reach_map(): every
     grid cell coloured by its own native-unit departure for ONE variable
     (dep_native -- already RATE_VARS-scaled and convert_delta()'d by the
@@ -1556,12 +1562,18 @@ def station_reach_variable_map(cell_sigma, cell_geojson, cell_window_label, dep_
             f"{station_window_label}: " + "%{customdata[3]}"
             "<extra></extra>")))
 
+    # Darker than station_reach_map()'s own default (0.3): this map's
+    # diverging red/blue scale is light through its own pale middle
+    # (near-zero difference), where the composite map's own blend
+    # washes out -- see state_line_blend's own parameter, shared
+    # between the two functions.
     fig.add_trace(go.Choropleth(
         locations=list(STATE_ABBR.values()), locationmode="USA-states",
         z=[1] * len(STATE_ABBR),
         colorscale=[[0, "rgba(0,0,0,0)"], [1, "rgba(0,0,0,0)"]],
-        showscale=False, marker_line_color=T["line"], marker_line_width=1,
-        hoverinfo="skip", showlegend=False))
+        showscale=False,
+        marker_line_color=_blend_hex(T["line"], T["muted"], state_line_blend),
+        marker_line_width=1, hoverinfo="skip", showlegend=False))
 
     # Same domain shift as station_reach_map(): nothing occupies that
     # left margin here (this map's own legend moved out to the bar
