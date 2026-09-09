@@ -57,6 +57,22 @@ same sigma matrix the argmin is taken over, so a store, not a second
 computation. Coincides with `sigma` exactly for the Annual window,
 where "Annual" is its own and only candidate. Never lower than `sigma`
 elsewhere, since `sigma` is a min over the same candidates.
+
+Task E adds six columns, dep_<VAR> for each of VARS: the native-unit
+departure (cell mean minus station mean, signed) that the composite's
+own z-score is built from before it is divided by the station's SD and
+passed through PCA -- so this is a decomposition of the SAME comparison
+`sigma` already reports, not a second, independently-optimised one.
+Both sides are read off exactly what composite_sigma_matrix() already
+uses for the WINNING candidate (best_idx): the cell's mean at the
+region's own fixed window (cell_means, unchanged across candidates)
+minus the station's mean at that winning candidate window
+(station_stats[(station, candidate)]["mean"], which covers all of VARS
+-- unlike "usable", which composite_sigma_matrix() applies only for the
+PCA step, a variable with ~0 interannual SD still has a perfectly good
+mean and so still gets a departure here). No variable is allowed to
+pick its own best candidate window independently -- all six read off
+the one candidate index the composite already minimised on.
 """
 import glob
 import os
@@ -196,11 +212,13 @@ def main():
 
     (out_lon, out_lat, out_station, out_window, out_station_window,
     out_sigma, out_sigma_same_window) = ([], [], [], [], [], [], [])
+    out_dep = {v: [] for v in VARS}
 
     for region_key, lk, _ in rw.WINDOWS:
         candidates = rw.CANDIDATES_BY_LENGTH[lk]
         same_idx = candidates.index(region_key)   # region_key is always its own length's own candidate
         cell_means = cell_window_mean[region_key]
+        cell_means_np = cell_means[VARS].to_numpy()   # (n_cells, 6), fixed across candidates
 
         for station in stations:
             # (n_candidates, n_cells) sigma matrix, then argmin per cell --
@@ -208,6 +226,11 @@ def main():
             # be reduced with a running np.minimum alone if the winning
             # window identity is also needed (it is: `station_window`).
             sigmas = np.full((len(candidates), n_cells), np.inf)
+            # (n_candidates, 6) station means, one row per candidate window --
+            # the OTHER thing composite_sigma_matrix() reads per candidate,
+            # kept here too so the six native departures can be read off the
+            # exact winning candidate afterwards instead of recomputed.
+            means = np.full((len(candidates), len(VARS)), np.nan)
             for ci, cand in enumerate(candidates):
                 st = station_stats[(station, cand)]
                 if st is None:
@@ -215,6 +238,7 @@ def main():
                 sigmas[ci] = composite_sigma_matrix(
                     st["mean"], st["std"], st["usable"],
                     st["kept_vecs"], st["kept_vals"], st["df"], cell_means)
+                means[ci] = st["mean"][VARS].to_numpy()
 
             best_idx = np.argmin(sigmas, axis=0)
             best_sigma = sigmas[best_idx, np.arange(n_cells)]
@@ -225,6 +249,14 @@ def main():
             # two sigma columns coincide by construction.
             same_window_sigma = sigmas[same_idx]
 
+            # Native departure at the WINNING candidate only (Task E):
+            # cell mean (region's own fixed window) minus station mean
+            # (best_idx's candidate window), same two quantities
+            # composite_sigma_matrix() already differenced before scaling
+            # by SD and projecting through PCA -- no separate per-variable
+            # argmin.
+            dep = cell_means_np - means[best_idx]   # (n_cells, 6)
+
             out_lon.append(lon_arr)
             out_lat.append(lat_arr)
             out_station.append(np.full(n_cells, station, dtype=object))
@@ -233,6 +265,8 @@ def main():
                 np.array([rw.DISPLAY_LABEL[candidates[i]] for i in best_idx], dtype=object))
             out_sigma.append(best_sigma)
             out_sigma_same_window.append(same_window_sigma)
+            for vi, v in enumerate(VARS):
+                out_dep[v].append(dep[:, vi])
 
     out = pd.DataFrame({
         "lon": np.concatenate(out_lon),
@@ -242,6 +276,7 @@ def main():
         "station_window": np.concatenate(out_station_window),
         "sigma": np.concatenate(out_sigma),
         "sigma_same_window": np.concatenate(out_sigma_same_window),
+        **{f"dep_{v}": np.concatenate(out_dep[v]) for v in VARS},
     })
     print(f"final table assembled: {len(out)} rows, {time.perf_counter()-t0:.2f}s")
 
@@ -254,6 +289,8 @@ def main():
     out["lat"] = out["lat"].astype("float32")
     out["sigma"] = out["sigma"].astype("float32")
     out["sigma_same_window"] = out["sigma_same_window"].astype("float32")
+    for v in VARS:
+        out[f"dep_{v}"] = out[f"dep_{v}"].astype("float32")
 
     t0 = time.perf_counter()
     out.to_parquet(OUT_PATH, index=False)
@@ -265,6 +302,10 @@ def main():
     finite = np.isfinite(out["sigma"])
     print(f"sigma stats: min={out['sigma'][finite].min():.3f} max={out['sigma'][finite].max():.3f} "
          f"median={out['sigma'][finite].median():.3f} n_inf_or_nan={(~finite).sum()}")
+    for v in VARS:
+        col = out[f"dep_{v}"]
+        n_nan = int(col.isna().sum())
+        print(f"dep_{v}: min={col.min():.3f} max={col.max():.3f} n_nan={n_nan}")
     print(f"\nTOTAL WALL TIME: {time.perf_counter()-t_total0:.1f}s")
 
 
