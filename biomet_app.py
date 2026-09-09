@@ -357,6 +357,16 @@ def inject_css(t):
       .st-key-rm_table_col {{
           border-left:1px solid {t['muted']}4d; padding-left:24px; }}
 
+      /* The ZIP code field's own border was white-on-white (checked
+         live: computed border-color matched the input's own background
+         exactly), giving no visual cue it's a fillable field at all
+         until focused. A plain light-grey border, always on, is what
+         every other bordered box in this app already uses to read as
+         "empty, waiting to be filled" (t['line'], the same token the
+         KPI cards and panels use). */
+      .st-key-rm_zip_code div[data-testid="stTextInputRootElement"] {{
+          border-color:{t['line']} !important; }}
+
       /* The station-window slider's own filled track: forced to the
          same flat, neutral colour as the base track, with no colour or
          gradient distinguishing a "filled" portion from the rest,
@@ -943,18 +953,18 @@ def nc_map(active, height=330):
 # THEMES and VARS. No em dashes: this is UI text, not code comments.
 HINTS = {
     "rm_reach_block":
-        "How far this station's climate reaches. This is a dissimilarity "
-        "index: each grid cell is coloured by how different its climate "
-        "is from the station (larger sigma means more different; under "
-        "2 sigma is generally a representative match), measured in units "
-        "of the station's year-to-year variation. Combines six variables "
-        "(mean temperature, diurnal temperature range, day-to-day "
-        "temperature change, dew point, precipitation, days THI ≥ 79).",
+        "How far this station's climate reaches. Each grid cell is "
+        "coloured by how different its climate is from the station, "
+        "using the sigma dissimilarity index: larger sigma means more "
+        "different, and under 2 sigma is considered an acceptable "
+        "analogue. Measured in units of the station's year-to-year "
+        "variation. Combines six variables (mean temperature, diurnal "
+        "temperature range, day-to-day temperature change, dew point, "
+        "precipitation, days THI ≥ 79).",
     "rm_reach_variable_block":
-        "This is a plain difference in the variable's own units, not a "
-        "similarity index -- the 2 sigma threshold does not apply here. "
-        "Each grid cell is coloured by how much higher (red) or lower "
-        "(blue) its own conditions are than the station's, over the same "
+        "This is a plain difference in the variable's own units. Each "
+        "grid cell is coloured by how much higher (red) or lower (blue) "
+        "its own conditions are than the station's, over the same "
         "windows shown on hover.",
     "rm_reach_window":
         "This window applies to every coloured cell on the map. The "
@@ -974,8 +984,7 @@ HINTS = {
         "climate rather than to comparing two different data sources. "
         "ECONet is the station's own measurements, but only goes back to 2006.",
     "rm_window_block":
-        "Choose the part of the year to compare, as a single window or "
-        "the full year.",
+        "Choose the part of the year to compare.",
     "rm_window_control":
         "Example: Jun 1 to Jul 30 is a 60-day summer window. Allowed from "
         "about a month up to the full year.",
@@ -999,25 +1008,18 @@ HINTS = {
         "Grid cells are about 55 to 60 km apart, so a radius under 50 km "
         "can easily find nothing even for an ordinary ZIP code.",
     "rm_radar":
-        "Selected region conditions against your selected stations. "
-        "Distribution shows each as a solid percentile band -- the "
-        "spread of 35 annual window means, the same thing sigma "
-        "compares; Departure shows each as a single line at its "
-        "per-variable departure, coloured by sigma band. The station "
-        "window can sit anywhere in the year, independent of the "
-        "region's own window above.",
+        "Selected region conditions compared to your selected stations. "
+        "Variable distribution (p5-p95) shows each as a percentile band "
+        "from 35 annual window means. Standardised difference shows each "
+        "station as a single line at its own departure, coloured by "
+        "sigma band. The station's window can fall anywhere in the year, "
+        "independent of the region's window above.",
     "rm_display_mode":
-        "Variable ranges draws each side -- selected region conditions and "
-        "station -- as its p5-95 percentile band. Capped at 3 stations, "
-        "since six annuli is twelve dashed contours and unreadable. "
-        "Standardised difference draws each station as a single line at "
-        "its standardised departure from the selected region conditions "
-        "-- station-interannual sigma units -- with no station cap, since "
-        "each is one line, closer to how the analogue papers plot this "
-        "themselves. Its radial background is coloured green/yellow/"
-        "orange/red by the published sigma-dissimilarity thresholds "
-        "(Mahony et al. 2017); the stations' own lines stay in the same "
-        "colours Variable ranges uses.",
+        "Variable distribution (p5-p95) shows each side as a percentile "
+        "band. Capped at 3 stations, since more than that gets hard to "
+        "read. Standardised difference shows each station as a single "
+        "line at its own departure from the region, in sigma units, "
+        "colour coded by how good a match it is. No station cap.",
     "rm_auto_select":
         "Runs the automatic search for the current location, reference "
         "period, window length and variables, and fills the station and "
@@ -1028,19 +1030,24 @@ HINTS = {
         "length and variables. You can remove any of them from the "
         "comparison, but not add others while automatic selection is on.",
     "rm_station_window":
-        "The handle marks where the window starts; its length always "
-        "matches the region's window. Sliding past December wraps into "
-        "January -- see the shaded block on the month bar below for "
-        "where it actually sits. Default matches the region's own "
-        "window exactly. Manual mode only: automatic selection gives "
-        "each station its own window instead.",
+        "Sets where the station's own window starts. Its length always "
+        "matches the region's window above. Sliding past December wraps "
+        "into January; see the shaded block on the month bar below for "
+        "where it actually sits. This control only applies in manual "
+        "mode. In automatic mode, each station gets its own window "
+        "instead, shown in the table below.",
     "rm_sigma":
-        "How many standard deviations apart the two climates are, across "
-        "all selected variables at once, correlation between them removed "
-        "(Mahony et al. 2017). Under 2σ is a representative analogue in "
-        "the literature; this is an absolute check, unlike the radar, "
-        "which only shows how the selected stations compare to each "
-        "other.",
+        "The sigma dissimilarity index shows how many standard "
+        "deviations apart the two locations are, across all selected "
+        "variables at once, using a Mahalanobis distance in a reduced "
+        "principal-component space (adapted from *Mahony et al.*, 2017, "
+        "Glob Change Biol. 23, 3934-3955, "
+        "[link](https://onlinelibrary.wiley.com/doi/10.1111/gcb.13645)). "
+        "Under 2σ, the climate is considered an acceptable analogue "
+        "(*Chaudhary et al.*, 2023, Sci Rep 13, 9317, "
+        "[link](https://www.nature.com/articles/s41598-023-35887-x)). "
+        "Unlike the radar, which only compares the selected stations to "
+        "each other, this is an absolute check.",
 }
 
 
@@ -1486,11 +1493,17 @@ def station_reach_variable_map(cell_sigma, cell_geojson, cell_window_label, dep_
     colour scale's centre (white), regardless of how skewed this
     station/window's own departures happen to be -- an unsymmetric
     default range would shift white off of zero and make "no
-    difference" look like a colour instead of no colour."""
-    finite = dep_native[np.isfinite(dep_native)]
-    m = float(np.abs(finite).max()) if len(finite) else 1.0
-    if m == 0:
-        m = 1.0
+    difference" look like a colour instead of no colour.
+
+    No inline colorbar here (showscale=False): the map keeps
+    station_reach_map()'s own domain shift (x=[0.08, 1]) so the US
+    outline renders at the exact same position and size regardless of
+    which Variable is selected, and the colour key is drawn separately,
+    by station_reach_variable_legend(), in the column station_reach_map()'s
+    own sigma bin bar chart would otherwise occupy -- not squeezed into
+    this map's own margin, where composite mode's categorical legend
+    already lives."""
+    m = _reach_variable_scale(dep_native)
 
     unit = unit_suffix(kind, metric)
     dep_text = [f"{d:+.2f}{unit}" if np.isfinite(d) else "n/a" for d in dep_native]
@@ -1507,8 +1520,7 @@ def station_reach_variable_map(cell_sigma, cell_geojson, cell_window_label, dep_
         locations=cell_sigma["cell_id"], featureidkey="properties.cell_id",
         z=dep_native, zmin=-m, zmax=m,
         colorscale="RdBu", reversescale=True,
-        marker_line_width=0, showscale=True,
-        colorbar=dict(title=dict(text=f"{var_label} departure{unit}")),
+        marker_line_width=0, showscale=False,
         customdata=customdata,
         hovertemplate=(
             "State: %{customdata[0]}<br>"
@@ -1524,10 +1536,48 @@ def station_reach_variable_map(cell_sigma, cell_geojson, cell_window_label, dep_
         showscale=False, marker_line_color=T["line"], marker_line_width=1,
         hoverinfo="skip", showlegend=False))
 
-    fig.update_geos(scope="usa", bgcolor="rgba(0,0,0,0)")
+    # Same domain shift as station_reach_map(): nothing occupies that
+    # left margin here (this map's own legend moved out to the bar
+    # chart's column), but keeping the shift is what makes the map body
+    # itself land at the same position/size in both modes.
+    fig.update_geos(scope="usa", bgcolor="rgba(0,0,0,0)", domain=dict(x=[0.08, 1], y=[0, 1]))
     fig.update_layout(
         height=height, margin=dict(l=0, r=0, t=0, b=0),
         paper_bgcolor="rgba(0,0,0,0)", font=dict(color=T["text"]))
+    return fig
+
+
+def _reach_variable_scale(dep_native):
+    """The +/-M symmetric colour scale limit station_reach_variable_map()
+    and station_reach_variable_legend() both need -- one function so the
+    map and its separate legend can never disagree on what the colours
+    mean."""
+    finite = dep_native[np.isfinite(dep_native)]
+    m = float(np.abs(finite).max()) if len(finite) else 1.0
+    return m if m > 0 else 1.0
+
+
+def station_reach_variable_legend(dep_native, var_label, kind, metric, height=560):
+    """The colour key for station_reach_variable_map(), drawn on its own
+    in the column station_reach_map()'s sigma bin bar chart would
+    otherwise occupy -- not inside the map itself. A single invisible
+    point carries the colorbar; there is nothing else to plot here."""
+    m = _reach_variable_scale(dep_native)
+    unit = unit_suffix(kind, metric)
+
+    fig = go.Figure(go.Scatter(
+        x=[None], y=[None], mode="markers",
+        marker=dict(
+            colorscale="RdBu", reversescale=True, cmin=-m, cmax=m, color=[0],
+            showscale=True,
+            colorbar=dict(title=dict(text=f"{var_label} departure{unit}"))),
+        hoverinfo="skip"))
+    fig.update_xaxes(visible=False)
+    fig.update_yaxes(visible=False)
+    fig.update_layout(
+        height=height, showlegend=False, margin=dict(l=0, r=10, t=10, b=10),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color=T["text"]))
     return fig
 
 
@@ -2669,11 +2719,11 @@ def sigma_bar_chart(sigma_by_station, stations, height=260):
     colors = [STATION_COLORS[i % len(STATION_COLORS)] for i in range(len(stations))]
     fig = go.Figure(go.Bar(x=stations, y=vals, marker_color=colors, hoverinfo="skip"))
     fig.add_hline(y=2, line=dict(color=SIGMA_BANDS[0][1], dash="dash", width=1.5),
-                 annotation_text="2σ — representative analogue threshold",
+                 annotation_text="2σ: acceptable analogue threshold",
                  annotation_font=dict(color=T["muted"], size=11),
                  annotation_position="top left")
     fig.add_hline(y=4, line=dict(color=SIGMA_BANDS[-1][1], dash="dash", width=1.5),
-                 annotation_text="4σ — extremely novel",
+                 annotation_text="4σ: extremely novel",
                  annotation_font=dict(color=T["muted"], size=11),
                  annotation_position="top left")
     fig.update_layout(
@@ -3206,13 +3256,11 @@ elif section == "Region Matching":
             & (station_reach["window"] == reach_window)
         ].merge(grid[["lon", "lat", "state"]], on=["lon", "lat"], how="left")
 
-        # Map shifted slightly left of centre by sharing the row with
-        # the bin-share bar chart to its right, rather than the map's
-        # own former full-width column. The bar chart only means
-        # anything for the composite's own 7 sigma bins (Task F): a
-        # native departure has no such bins, so that column is simply
-        # left empty in per-variable mode rather than showing something
-        # that doesn't apply.
+        # Map shifted slightly left of centre by sharing the row with a
+        # second column to its right -- the bin-share bar chart in
+        # composite mode, or the variable map's own colour key in
+        # per-variable mode (Task F/G), so the map itself stays the same
+        # size and position in this row either way.
         map_col, bar_col = st.columns([3, 1], gap="medium")
         with map_col:
             if is_composite:
@@ -3241,6 +3289,11 @@ elif section == "Region Matching":
             if is_composite:
                 st.plotly_chart(sigma_bin_bar_chart(cell_sigma), width=W,
                                 config={"displayModeBar": False})
+            else:
+                st.plotly_chart(
+                    station_reach_variable_legend(
+                        dep_native, RM_REACH_VAR_LABELS[var_key], kind, metric),
+                    width=W, config={"displayModeBar": False})
 
     with tab_advanced:
         with st.container(key="rm_block_map"), \
@@ -3250,6 +3303,7 @@ elif section == "Region Matching":
             st.session_state.setdefault("rm_location_mode", "Region")
             st.segmented_control(
                 "Location mode", ["Region", "ZIP + radius"],
+                format_func=lambda m: "Region/State" if m == "Region" else m,
                 key="rm_location_mode", help=HINTS["rm_location_mode"])
             rm_location_mode = st.session_state.rm_location_mode
 
@@ -3305,9 +3359,44 @@ elif section == "Region Matching":
                         "ZIP code", key="rm_zip_code", placeholder="e.g. 27601",
                         help=HINTS["rm_zip_input"])
                 with radius_col:
-                    rm_zip_radius = st.slider(
-                        "Radius (km)", min_value=50, max_value=300, value=100,
-                        step=10, key="rm_zip_radius", help=HINTS["rm_zip_radius"])
+                    # Distance unit follows the global Metric/Imperial
+                    # toggle, same as every other measurement in this app,
+                    # but the underlying search always needs one physical
+                    # unit (km, used by cached_zip_radius_selection()
+                    # below). Two widget keys, one canonical km value: on
+                    # a unit switch, this run's target widget is re-seeded
+                    # from the canonical value BEFORE it is created (legal
+                    # -- it happens before that key's widget exists this
+                    # run), so the same physical radius survives toggling
+                    # Metric<->Imperial instead of being reinterpreted in
+                    # the new unit.
+                    st.session_state.setdefault("_rm_zip_radius_km", 100.0)
+                    st.session_state.setdefault("_rm_zip_radius_unit", "km" if metric else "mi")
+                    _radius_unit = "km" if metric else "mi"
+                    if st.session_state["_rm_zip_radius_unit"] != _radius_unit:
+                        if _radius_unit == "km":
+                            st.session_state["rm_zip_radius_km_w"] = round(
+                                st.session_state["_rm_zip_radius_km"] / 10) * 10
+                        else:
+                            st.session_state["rm_zip_radius_mi_w"] = round(
+                                st.session_state["_rm_zip_radius_km"] * 0.621371 / 5) * 5
+                        st.session_state["_rm_zip_radius_unit"] = _radius_unit
+
+                    if metric:
+                        st.session_state.setdefault("rm_zip_radius_km_w", 100)
+                        radius_native = st.slider(
+                            "Radius (km)", min_value=50, max_value=300, step=10,
+                            key="rm_zip_radius_km_w", help=HINTS["rm_zip_radius"])
+                        st.session_state["_rm_zip_radius_km"] = float(radius_native)
+                    else:
+                        st.session_state.setdefault("rm_zip_radius_mi_w", 60)
+                        radius_native = st.slider(
+                            "Radius (mi)", min_value=30, max_value=190, step=5,
+                            key="rm_zip_radius_mi_w", help=HINTS["rm_zip_radius"])
+                        st.session_state["_rm_zip_radius_km"] = radius_native / 0.621371
+
+                    rm_zip_radius = round(st.session_state["_rm_zip_radius_km"])
+                    radius_display = f"{radius_native} {'km' if metric else 'mi'}"
 
                 zip_code_clean = rm_zip_code.strip()
                 if not zip_code_clean:
@@ -3336,7 +3425,7 @@ elif section == "Region Matching":
                         # 0-cell result here means a genuinely sparse
                         # spot, not too-small an input.
                         st.info(
-                            f"No grid cell falls within {rm_zip_radius} km of "
+                            f"No grid cell falls within {radius_display} of "
                             "this ZIP code. Grid cells are spaced about 55 to "
                             "60 km apart -- try a larger radius.")
                     else:
@@ -3369,9 +3458,20 @@ elif section == "Region Matching":
             with window_col, st.container(key="rm_window_col"):
                 st.caption(HINTS["rm_window_block"])
 
+                # Read before the radio below creates it, so "Subannual"
+                # can show the window's current length next to its own
+                # name (e.g. "Subannual (60 days)"), always matching what
+                # the slider further down is about to render.
+                st.session_state.setdefault(
+                    "rm_window", (date(2001, 6, 1), date(2001, 7, 30)))
+                _prev_lo, _prev_hi = st.session_state.rm_window
+                _prev_win_days = (_prev_hi - _prev_lo).days + 1
+
                 st.session_state.setdefault("rm_window_mode", "Subannual")
                 st.radio("Coverage", ["Annual", "Subannual"], key="rm_window_mode",
-                         horizontal=True, on_change=_set_rm_window_annual)
+                         horizontal=True, on_change=_set_rm_window_annual,
+                         format_func=lambda m: f"Subannual ({_prev_win_days} days)"
+                                              if m == "Subannual" else m)
                 is_annual = st.session_state.rm_window_mode == "Annual"
 
                 # No value= here: _set_rm_window_annual() writes rm_window's
@@ -3380,8 +3480,6 @@ elif section == "Region Matching":
                 # explicit value and a pre-existing session_state entry. setdefault
                 # supplies the one-time initial value instead, same as months_sel
                 # and trend_rate_control's key do it elsewhere in this file.
-                st.session_state.setdefault(
-                    "rm_window", (date(2001, 6, 1), date(2001, 7, 30)))
                 rm_window = st.slider(
                     "Window", min_value=date(2001, 1, 1), max_value=date(2001, 12, 31),
                     step=timedelta(days=10), format="MMM D",
@@ -3419,6 +3517,14 @@ elif section == "Region Matching":
 
             with ref_col, st.container(key="rm_ref_col"):
                 st.caption(HINTS["rm_reference_period"])
+                # Read before the widget below creates it, so the count
+                # shown here always matches what the slider is about to
+                # render, including on the very first run.
+                _prev_ref_years = st.session_state.get("rm_ref_years", (1991, 2025))
+                st.markdown(
+                    f"<div style='text-align:center; color:{T['muted']}; "
+                    f"font-size:0.8rem;'>({_prev_ref_years[1] - _prev_ref_years[0] + 1} "
+                    "years)</div>", unsafe_allow_html=True)
                 rm_ref_years = st.slider("Years", 1991, 2025, (1991, 2025),
                                          key="rm_ref_years")
                 if rm_ref_years[1] - rm_ref_years[0] + 1 < 20:
@@ -3427,9 +3533,13 @@ elif section == "Region Matching":
 
             with source_col, st.container(key="rm_source_col"):
                 st.caption(HINTS["rm_station_source_block"])
+                # label_visibility left at its default (visible), not
+                # "collapsed" as before: a collapsed label also hides its
+                # own help (?) icon, which was silently swallowing this
+                # radio's only explanation of why MERRA-2 is recommended.
                 rm_source = st.radio(
                     "NC stations data source", ["MERRA-2 (recommended)", "ECONet"],
-                    key="rm_source", horizontal=True, label_visibility="collapsed",
+                    key="rm_source", horizontal=True,
                     help=HINTS["rm_station_source_control"])
                 if rm_source == "ECONet" and rm_ref_years[0] < 2006:
                     st.warning("ECONet station records only go back to 2006. Move "
@@ -3603,7 +3713,7 @@ elif section == "Region Matching":
                         # actually supports, not a full per-option affordance.
                         st.radio(
                             "Display", ["Distribution", "Departure"],
-                            format_func=lambda m: {"Distribution": "Variable ranges",
+                            format_func=lambda m: {"Distribution": "Variable distribution (p5-p95)",
                                                   "Departure": "Standardised difference"}[m],
                             key="rm_display_mode", help=HINTS["rm_display_mode"])
 
@@ -3641,7 +3751,7 @@ elif section == "Region Matching":
                             # station table below is what shows those instead.
                             st.caption("Station window")
                             st.caption("Each station uses its own automatically "
-                                      "found window — see the table below.")
+                                      "found window. See the table below.")
                         else:
                             # The label is what explains the control; a plain
                             # slider (no extra columns squeezing it narrower than
@@ -3775,7 +3885,7 @@ elif section == "Region Matching":
                                                       for v in sigma_by_stn[stn]["dropped"])
                                 for stn in radar_stations if sigma_by_stn[stn]["dropped"])
                             if dropped_msg:
-                                st.caption("Dropped from sigma dissimilarity — no "
+                                st.caption("Dropped from sigma dissimilarity. No "
                                           f"interannual variation at the station: {dropped_msg}")
 
                         with table_col, st.container(key="rm_table_col"):
@@ -3841,11 +3951,11 @@ elif section == "Region Matching":
                                 rows.append(rec)
                             st.dataframe(pd.DataFrame(rows), width=W, hide_index=True)
                             if standardized:
-                                st.caption("Departure in station-interannual sigma units: "
-                                          "selected region conditions minus station, divided "
-                                          "by that station's own interannual SD -- the same "
-                                          "number the Departure radar's axes plot. Blank: "
-                                          "no interannual variation at the station to divide by.")
+                                st.caption("Departure in interannual sigma units: selected "
+                                          "region conditions minus station, divided by the "
+                                          "station's own interannual standard deviation. Same "
+                                          "number the Departure radar plots. Blank: no "
+                                          "interannual variation at the station to divide by.")
                             else:
                                 st.caption("Departure in native units: selected region "
                                           "conditions minus station, signed.")
