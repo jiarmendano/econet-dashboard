@@ -67,26 +67,35 @@ STATION_COLORS = ["#E69F00", "#56B4E9", "#009E73",
 # choropleth if that turns out to matter in practice.
 USDA_REGION_COLORS = ["#D5C9E1", "#B3FFFF", "#E0DAC2", "#C5FFE4", "#FFB1A7"]
 
-# Station reach map (Task N+1, palette redone Task A): 7 discrete bins
-# (0-1, 1-2, ..., 5-6, 6+ sigma), family changing exactly at 2 and 4
-# sigma -- two greens, two ambers, two reds, one dark red/maroon for the
-# open-ended top bin. Bin 0 (0-1) is a proper mid-toned green rather
-# than a pale mint, and bin 1 (1-2) is yellow-green rather than a second
-# light green, so the ramp reads as an actual traffic light (green ->
-# yellow-green -> amber -> orange -> red -> dark red -> maroon) and the
-# white state-boundary line (Task N+1) stays visible against bin 0
-# instead of nearly disappearing into it. Relative luminance still
-# decreases monotonically bin 1 -> bin 7 (checked numerically, not
-# eyeballed: WCAG relative luminance 0.50, 0.40, 0.33, 0.23, 0.15,
-# 0.085, 0.03) so the sequence still reads as "worse and worse" in
-# greyscale, and survives red-green colour blindness, which collapses
-# the hue difference between the green and red families but not this
-# lightness gradient. Same 7 colours in both themes -- sigma severity
-# isn't a light/dark-mode concept -- kept under THEMES anyway, not a
-# standalone module constant, so a future theme swap has one place to
-# change it, the same reasoning region_colors already follows.
-SIGMA_RAMP_7 = ["#54D45F", "#80BA2F", "#C09530", "#C17029",
-               "#C23D31", "#9A272A", "#591A24"]
+# Station reach map (Task N+1, palette redone Task A, resampled from a
+# user-supplied 28-swatch teal-to-maroon spectral palette): 7 discrete
+# bins (0-1, 1-2, ..., 5-6, 6+ sigma), one colour every ~4-5 swatches
+# (indices 1, 6, 11, 15, 18, 22, 26 of the 28), not adjacent ones, so
+# the 7 stay visually separated across the full given range rather than
+# bunching in one corner of it. Reads teal (bin 0, best match) -> green
+# -> pale yellow-green -> gold -> orange -> dark red -> near-black
+# maroon (bin 6, most novel), the same "worse and worse" ordering the
+# old green-to-maroon ramp had.
+#
+# Trade-off, flagged rather than silently fixed: the OLD ramp's own
+# WCAG relative luminance decreased monotonically end to end (checked
+# numerically), which kept the severity ordering legible in greyscale
+# and under red-green colour blindness even with the hue cue removed.
+# This palette's own luminance RISES from swatch 0 (0.19) to swatch 11
+# (0.87) before falling to swatch 27 (0.01) -- a spectral shape, not a
+# one-directional ramp -- so bins 0-2 (teal/green, luminance 0.22/0.47/
+# 0.87) do not honour that property; only bins 2-6 (pale yellow-green
+# through maroon) decrease monotonically. Swapped in as given rather
+# than restricted to the monotonic half of the palette, which would
+# have dropped the green "good match" hue entirely -- pending
+# confirmation this reads well in practice.
+#
+# Same 7 colours in both themes -- sigma severity isn't a light/dark-
+# mode concept -- kept under THEMES anyway, not a standalone module
+# constant, so a future theme swap has one place to change it, the same
+# reasoning region_colors already follows.
+SIGMA_RAMP_7 = ["#0A8E94", "#72C79E", "#E5F8AD", "#E9B930",
+               "#F68B00", "#8D232B", "#4f0f00"]
 
 THEMES = {
     "dark": dict(
@@ -1039,12 +1048,12 @@ HINTS = {
         "The sigma dissimilarity index shows how many standard "
         "deviations apart the two locations are, across all selected "
         "variables at once, using a Mahalanobis distance in a reduced "
-        "principal-component space (adapted from *Mahony et al.*, 2017, "
-        "Glob Change Biol. 23, 3934-3955, "
-        "[link](https://onlinelibrary.wiley.com/doi/10.1111/gcb.13645)). "
+        "principal-component space (adapted from "
+        "[*Mahony et al.*, 2017, Glob Change Biol. 23, 3934-3955]"
+        "(https://onlinelibrary.wiley.com/doi/10.1111/gcb.13645)). "
         "Under 2σ, the climate is considered an acceptable analogue "
-        "(*Chaudhary et al.*, 2023, Sci Rep 13, 9317, "
-        "[link](https://www.nature.com/articles/s41598-023-35887-x)). "
+        "([*Chaudhary et al.*, 2023, Sci Rep 13, 9317]"
+        "(https://www.nature.com/articles/s41598-023-35887-x)). "
         "Unlike the radar, which only compares the selected stations to "
         "each other, this is an absolute check.",
 }
@@ -1462,12 +1471,21 @@ def station_reach_map(cell_sigma, cell_geojson, cell_window_label, is_annual, he
                 f"{station_window_label}: " + "%{customdata[3]}"
                 "<extra></extra>")))
 
+    # T["muted"] alone (a real grey) was tried here in place of T["line"]
+    # but reverted -- too dark to read against the ramp's own darkest
+    # bins (near-black maroon). Plain T["line"] alone then read too
+    # light against the ramp's own palest bins instead. _blend_hex()
+    # nudges T["line"] a little way toward T["muted"] (t=0.3, "slightly
+    # darker" per the request) rather than picking either extreme
+    # outright. Plotly's Choropleth marker.line has no dash option at
+    # all (only colour and width), so a dashed state border was never
+    # on the table either way.
     fig.add_trace(go.Choropleth(
         locations=list(STATE_ABBR.values()), locationmode="USA-states",
         z=[1] * len(STATE_ABBR),
         colorscale=[[0, "rgba(0,0,0,0)"], [1, "rgba(0,0,0,0)"]],
-        showscale=False, marker_line_color=T["line"], marker_line_width=1,
-        hoverinfo="skip", showlegend=False))
+        showscale=False, marker_line_color=_blend_hex(T["line"], T["muted"], 0.3),
+        marker_line_width=1, hoverinfo="skip", showlegend=False))
 
     # Domain shifted right of the legend's own column (x=0.01), the same
     # "free up the left margin for the legend" move region_radar() already
@@ -2489,6 +2507,20 @@ def _hex_to_rgba(hex_color, alpha):
     hex_color = hex_color.lstrip("#")
     r, g, b = (int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
     return f"rgba({r},{g},{b},{alpha})"
+
+
+def _blend_hex(hex_a, hex_b, t):
+    """Linear RGB blend of two "#RRGGBB" colours, t=0 -> hex_a, t=1 ->
+    hex_b. station_reach_map()'s own state line: T["line"] alone reads
+    fine against the sigma ramp's darkest bins but nearly vanishes
+    against its palest ones, and T["muted"] alone is the reverse --
+    dark enough to disappear into the darkest bins. A small blend
+    toward T["muted"] keeps T["line"]'s own contrast against dark bins
+    mostly intact while giving it enough weight to still read against
+    light ones, rather than picking either extreme outright."""
+    a = tuple(int(hex_a.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
+    b = tuple(int(hex_b.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
+    return "#" + "".join(f"{round(a[i] + (b[i] - a[i]) * t):02x}" for i in range(3))
 
 
 # Mahony et al. (2017), as applied to climate analogues in Fitzpatrick &
