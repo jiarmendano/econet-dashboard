@@ -950,6 +950,12 @@ HINTS = {
         "of the station's year-to-year variation. Combines six variables "
         "(mean temperature, diurnal temperature range, day-to-day "
         "temperature change, dew point, precipitation, days THI ≥ 79).",
+    "rm_reach_variable_block":
+        "This is a plain difference in the variable's own units, not a "
+        "similarity index -- the 2 sigma threshold does not apply here. "
+        "Each grid cell is coloured by how much higher (red) or lower "
+        "(blue) its own conditions are than the station's, over the same "
+        "windows shown on hover.",
     "rm_reach_window":
         "This window applies to every coloured cell on the map. The "
         "station's own window is picked automatically: the app tries "
@@ -1057,11 +1063,19 @@ RM_REACH_LENGTHS = ["12mo", "3mo", "6mo", "9mo"]
 RM_REACH_LENGTH_LABELS = {"12mo": "Annual", "3mo": "3 months",
                          "6mo": "6 months", "9mo": "9 months"}
 
-# The Variable selectbox's only option today (composite only -- see its
-# call site). Named so the caption below it can check against the same
-# string rather than a literal repeated at both places, and so a later
-# task adding per-variable options has one constant to compare against.
+# The Variable selectbox's first option (see its call site). Named so
+# the caption below it can check against the same string rather than a
+# literal repeated at both places.
 RM_REACH_COMPOSITE_LABEL = "Composite sigma dissimilarity"
+
+# The Variable selectbox's other options (Task F): the same six default
+# variables precompute_station_reach.py already stores a native-unit
+# departure for (dep_<VAR> columns, GRID_VARS' own six default=True
+# entries), in the one fixed order both files use, so a station_reach
+# column name and a selectbox choice always line up positionally.
+RM_REACH_VARS = ["T2M", "DTR", "interdiurnal_T2M", "T2MDEW", "PRECTOTCORR", "THI_ge_79"]
+RM_REACH_VAR_LABELS = {v: GRID_VARS[v]["label"] for v in RM_REACH_VARS}
+RM_REACH_LABEL_TO_VAR = {label: v for v, label in RM_REACH_VAR_LABELS.items()}
 
 
 def _set_reach_length_window():
@@ -1451,6 +1465,69 @@ def station_reach_map(cell_sigma, cell_geojson, cell_window_label, height=560):
         paper_bgcolor="rgba(0,0,0,0)", font=dict(color=T["text"]),
         legend=dict(orientation="v", yanchor="middle", y=0.5,
                     xanchor="left", x=0.01, title=dict(text="Sigma dissimilarity")))
+    return fig
+
+
+def station_reach_variable_map(cell_sigma, cell_geojson, cell_window_label, dep_native,
+                               var_label, kind, metric, height=560):
+    """Task F's per-variable counterpart to station_reach_map(): every
+    grid cell coloured by its own native-unit departure for ONE variable
+    (dep_native -- already RATE_VARS-scaled and convert_delta()'d by the
+    caller, so this function only plots) instead of the composite's 7-bin
+    sigma. A continuous diverging scale, not station_reach_map()'s flat
+    per-bin fills, since there is no fixed threshold to bin against here
+    -- unlike sigma, a native departure has no published "under 2" cutoff
+    (see HINTS["rm_reach_variable_block"]).
+
+    Plotly's built-in "RdBu" runs red (low) to blue (high);
+    reversescale=True flips it to red=higher-than-station,
+    blue=lower-than-station, matching the task's own colour assignment.
+    zmin/zmax are set to the same +/-M so zero always lands at the
+    colour scale's centre (white), regardless of how skewed this
+    station/window's own departures happen to be -- an unsymmetric
+    default range would shift white off of zero and make "no
+    difference" look like a colour instead of no colour."""
+    finite = dep_native[np.isfinite(dep_native)]
+    m = float(np.abs(finite).max()) if len(finite) else 1.0
+    if m == 0:
+        m = 1.0
+
+    unit = unit_suffix(kind, metric)
+    dep_text = [f"{d:+.2f}{unit}" if np.isfinite(d) else "n/a" for d in dep_native]
+    customdata = np.stack([
+        cell_sigma["state"].to_numpy(),
+        np.array(dep_text, dtype=object),
+        np.full(len(cell_sigma), cell_window_label, dtype=object),
+        cell_sigma["station_window"].to_numpy(),
+    ], axis=-1)
+
+    fig = go.Figure()
+    fig.add_trace(go.Choropleth(
+        geojson=_filter_geojson(cell_geojson, cell_sigma["cell_id"]),
+        locations=cell_sigma["cell_id"], featureidkey="properties.cell_id",
+        z=dep_native, zmin=-m, zmax=m,
+        colorscale="RdBu", reversescale=True,
+        marker_line_width=0, showscale=True,
+        colorbar=dict(title=dict(text=f"{var_label} departure{unit}")),
+        customdata=customdata,
+        hovertemplate=(
+            "State: %{customdata[0]}<br>"
+            f"{var_label} departure: " + "%{customdata[1]}<br>"
+            "Destination cell window (selected): %{customdata[2]}<br>"
+            "Fitted station window (best match): %{customdata[3]}"
+            "<extra></extra>")))
+
+    fig.add_trace(go.Choropleth(
+        locations=list(STATE_ABBR.values()), locationmode="USA-states",
+        z=[1] * len(STATE_ABBR),
+        colorscale=[[0, "rgba(0,0,0,0)"], [1, "rgba(0,0,0,0)"]],
+        showscale=False, marker_line_color=T["line"], marker_line_width=1,
+        hoverinfo="skip", showlegend=False))
+
+    fig.update_geos(scope="usa", bgcolor="rgba(0,0,0,0)")
+    fig.update_layout(
+        height=height, margin=dict(l=0, r=0, t=0, b=0),
+        paper_bgcolor="rgba(0,0,0,0)", font=dict(color=T["text"]))
     return fig
 
 
@@ -3105,19 +3182,20 @@ elif section == "Region Matching":
                          on_click=_step_reach_window, args=(1,))
 
         with var_col:
-            # Composite only for now -- the control stays in place so
-            # per-variable options (a later task) slot into the same
-            # spot rather than needing a new one added.
-            st.selectbox("Variable", [RM_REACH_COMPOSITE_LABEL], key="reach_variable")
+            st.selectbox(
+                "Variable",
+                [RM_REACH_COMPOSITE_LABEL] + [RM_REACH_VAR_LABELS[v] for v in RM_REACH_VARS],
+                key="reach_variable")
         reach_variable = st.session_state.reach_variable
+        is_composite = reach_variable == RM_REACH_COMPOSITE_LABEL
 
         # Explanation sits below the filters, not above them -- read
-        # after picking, not before -- and only when the composite index
-        # is actually selected: forward-looking for per-variable options
-        # (a later task), which will need their own text instead of this
-        # one always showing regardless of what's picked.
-        if reach_variable == RM_REACH_COMPOSITE_LABEL:
-            st.caption(HINTS["rm_reach_block"])
+        # after picking, not before -- and matches whichever mode is
+        # actually selected: the composite's own text names the six
+        # variables and the 2-sigma cutoff, neither of which apply to a
+        # single variable's plain native-unit departure (Task F).
+        st.caption(HINTS["rm_reach_block"] if is_composite
+                  else HINTS["rm_reach_variable_block"])
         st.caption("All values computed from MERRA-2, 1991-2025.")
 
         reach_window = st.session_state.reach_window
@@ -3130,15 +3208,39 @@ elif section == "Region Matching":
 
         # Map shifted slightly left of centre by sharing the row with
         # the bin-share bar chart to its right, rather than the map's
-        # own former full-width column.
+        # own former full-width column. The bar chart only means
+        # anything for the composite's own 7 sigma bins (Task F): a
+        # native departure has no such bins, so that column is simply
+        # left empty in per-variable mode rather than showing something
+        # that doesn't apply.
         map_col, bar_col = st.columns([3, 1], gap="medium")
         with map_col:
-            st.plotly_chart(
-                station_reach_map(cell_sigma, cell_rectangles, reach_window_label),
-                width=W, config={"displayModeBar": False})
+            if is_composite:
+                fig = station_reach_map(cell_sigma, cell_rectangles, reach_window_label)
+            else:
+                var_key = RM_REACH_LABEL_TO_VAR[reach_variable]
+                kind = GRID_VARS[var_key]["kind"]
+                # RATE_VARS (PRECTOTCORR, THI_ge_79) are stored as rates
+                # (mean mm/day, fraction of days) -- see RATE_VARS and
+                # precompute_station_reach.py's own dep_ columns, which
+                # inherit that from station_pentad/cell_pentad. Region
+                # and station candidate windows always share one length
+                # (CANDIDATES_BY_LENGTH is keyed by length), so the same
+                # win_days scales both sides of the difference, the same
+                # rate_scale pattern the Advanced search results table
+                # already uses.
+                win_days = len(rw.WINDOW_PENTADS[reach_window]) * 5
+                rate_scale = win_days if var_key in RATE_VARS else 1
+                dep_raw = cell_sigma[f"dep_{var_key}"].to_numpy() * rate_scale
+                dep_native = convert_delta(dep_raw, kind, metric)
+                fig = station_reach_variable_map(
+                    cell_sigma, cell_rectangles, reach_window_label, dep_native,
+                    RM_REACH_VAR_LABELS[var_key], kind, metric)
+            st.plotly_chart(fig, width=W, config={"displayModeBar": False})
         with bar_col:
-            st.plotly_chart(sigma_bin_bar_chart(cell_sigma), width=W,
-                            config={"displayModeBar": False})
+            if is_composite:
+                st.plotly_chart(sigma_bin_bar_chart(cell_sigma), width=W,
+                                config={"displayModeBar": False})
 
     with tab_advanced:
         with st.container(key="rm_block_map"), \
