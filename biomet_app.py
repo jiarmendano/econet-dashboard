@@ -1053,9 +1053,7 @@ HINTS = {
         "(https://onlinelibrary.wiley.com/doi/10.1111/gcb.13645)). "
         "Under 2σ, the climate is considered an acceptable analogue "
         "([*Chaudhary et al.*, 2023, Sci Rep 13, 9317]"
-        "(https://www.nature.com/articles/s41598-023-35887-x)). "
-        "Unlike the radar, which only compares the selected stations to "
-        "each other, this is an absolute check.",
+        "(https://www.nature.com/articles/s41598-023-35887-x)).",
 }
 
 
@@ -4004,8 +4002,8 @@ elif section == "Region Matching":
                                 rows.append(rec)
                             st.dataframe(pd.DataFrame(rows), width=W, hide_index=True)
                             if standardized:
-                                st.caption("Departure in interannual sigma units: selected "
-                                          "region conditions minus station, divided by the "
+                                st.caption("Standardised difference: selected region "
+                                          "conditions minus station, divided by the "
                                           "station's own interannual standard deviation. Same "
                                           "number the Departure radar plots. Blank: no "
                                           "interannual variation at the station to divide by.")
