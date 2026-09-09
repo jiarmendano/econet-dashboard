@@ -510,7 +510,7 @@ GRID_VARS = {
     "DTR":              dict(label="Diurnal temperature range",     kind="temp",   default=True),
     "interdiurnal_T2M": dict(label="Day to day temperature change", kind="temp",   default=True),
     "T2MDEW":           dict(label="Dew point",                     kind="temp",   default=True),
-    "PRECTOTCORR":      dict(label="Precipitation",                 kind="precip", default=True),
+    "PRECTOTCORR":      dict(label="Rainfall",                      kind="precip", default=True),
     "THI_ge_79":        dict(label="Days THImax ≥ 79",         kind="days",   default=True),
     "THImax":           dict(label="Maximum THI",                   kind="index",  default=False),
     "RHmed":            dict(label="Mean relative humidity",        kind="pct",    default=False),
@@ -954,13 +954,13 @@ def nc_map(active, height=330):
 HINTS = {
     "rm_reach_block":
         "How far this station's climate reaches. Each grid cell is "
-        "coloured by how different its climate is from the station, "
-        "using the sigma dissimilarity index: larger sigma means more "
-        "different, and under 2 sigma is considered an acceptable "
-        "analogue. Measured in units of the station's year-to-year "
-        "variation. Combines six variables (mean temperature, diurnal "
-        "temperature range, day-to-day temperature change, dew point, "
-        "precipitation, days THI ≥ 79).",
+        "coloured by how different its climate is from the selected "
+        "station (using the sigma dissimilarity index, that combines "
+        "mean temperature, diurnal temperature range, day-to-day "
+        "temperature change, dew point, rainfall, and days THImax ≥ "
+        "79). Larger sigma values mean more different. Values below 2 "
+        "sigma are considered an acceptable analogue. More details in "
+        "Advanced search.",
     "rm_reach_variable_block":
         "This is a plain difference in the variable's own units. Each "
         "grid cell is coloured by how much higher (red) or lower (blue) "
@@ -989,8 +989,7 @@ HINTS = {
         "Example: Jun 1 to Jul 30 is a 60-day summer window. Allowed from "
         "about a month up to the full year.",
     "rm_variables":
-        "Six variables make up the default comparison set. THImax and "
-        "RHmed are included but unchecked.",
+        "Six variables make up the default comparison set.",
     "rm_map_block":
         "Pick a region, then optionally narrow it to specific states "
         "within it. Or switch to ZIP + radius to pick an area by "
@@ -1405,7 +1404,7 @@ def _filter_geojson(cell_geojson, cell_ids):
     }
 
 
-def station_reach_map(cell_sigma, cell_geojson, cell_window_label, height=560):
+def station_reach_map(cell_sigma, cell_geojson, cell_window_label, is_annual, height=560):
     """Every grid cell, coloured by its own composite sigma dissimilarity
     against one station in one window (station_reach.parquet, already
     filtered to that one station/window, joined to conus_grid.parquet
@@ -1420,6 +1419,12 @@ def station_reach_map(cell_sigma, cell_geojson, cell_window_label, height=560):
     never is -- rather than a continuous colour axis with tick labels
     standing in for one.
 
+    is_annual: whether reach_window is "Annual", the caller's own choice
+    -- when the region side has only one candidate window, the station
+    side isn't really "matched" against alternatives (there is only one),
+    so the hover's "(best match)" phrasing is dropped rather than
+    implying a comparison that never happened.
+
     State boundaries are a separate Choropleth trace (transparent fill,
     thin THEMES line), added AFTER the bin traces so it draws on top of
     them: geo.showsubunits draws underneath the cell polygons instead
@@ -1427,6 +1432,8 @@ def station_reach_map(cell_sigma, cell_geojson, cell_window_label, height=560):
     sigma = cell_sigma["sigma"].to_numpy()
     bin_idx = sigma_bin_index(sigma)
     ramp = T["sigma_ramp"]
+    station_window_label = ("Station time window" if is_annual
+                            else "Station time window (best match)")
 
     fig = go.Figure()
     for b, label in enumerate(SIGMA_BIN_LABELS):
@@ -1450,9 +1457,9 @@ def station_reach_map(cell_sigma, cell_geojson, cell_window_label, height=560):
             customdata=customdata,
             hovertemplate=(
                 "State: %{customdata[0]}<br>"
-                "Composite sigma: %{customdata[1]}<br>"
-                "Destination cell window (selected): %{customdata[2]}<br>"
-                "Fitted station window (best match): %{customdata[3]}"
+                "Sigma dissimilarity index: %{customdata[1]}<br>"
+                "Grid cell time window (selected): %{customdata[2]}<br>"
+                f"{station_window_label}: " + "%{customdata[3]}"
                 "<extra></extra>")))
 
     fig.add_trace(go.Choropleth(
@@ -1476,7 +1483,7 @@ def station_reach_map(cell_sigma, cell_geojson, cell_window_label, height=560):
 
 
 def station_reach_variable_map(cell_sigma, cell_geojson, cell_window_label, dep_native,
-                               var_label, kind, metric, height=560):
+                               var_label, kind, metric, is_annual, height=560):
     """Task F's per-variable counterpart to station_reach_map(): every
     grid cell coloured by its own native-unit departure for ONE variable
     (dep_native -- already RATE_VARS-scaled and convert_delta()'d by the
@@ -1504,6 +1511,8 @@ def station_reach_variable_map(cell_sigma, cell_geojson, cell_window_label, dep_
     this map's own margin, where composite mode's categorical legend
     already lives."""
     m = _reach_variable_scale(dep_native)
+    station_window_label = ("Station time window" if is_annual
+                            else "Station time window (best match)")
 
     unit = unit_suffix(kind, metric)
     dep_text = [f"{d:+.2f}{unit}" if np.isfinite(d) else "n/a" for d in dep_native]
@@ -1524,9 +1533,9 @@ def station_reach_variable_map(cell_sigma, cell_geojson, cell_window_label, dep_
         customdata=customdata,
         hovertemplate=(
             "State: %{customdata[0]}<br>"
-            f"{var_label} departure: " + "%{customdata[1]}<br>"
-            "Destination cell window (selected): %{customdata[2]}<br>"
-            "Fitted station window (best match): %{customdata[3]}"
+            f"{var_label} difference: " + "%{customdata[1]}<br>"
+            "Grid cell time window (selected): %{customdata[2]}<br>"
+            f"{station_window_label}: " + "%{customdata[3]}"
             "<extra></extra>")))
 
     fig.add_trace(go.Choropleth(
@@ -1570,7 +1579,7 @@ def station_reach_variable_legend(dep_native, var_label, kind, metric, height=56
         marker=dict(
             colorscale="RdBu", reversescale=True, cmin=-m, cmax=m, color=[0],
             showscale=True,
-            colorbar=dict(title=dict(text=f"{var_label} departure{unit}"))),
+            colorbar=dict(title=dict(text=f"{var_label} difference{unit}"))),
         hoverinfo="skip"))
     fig.update_xaxes(visible=False)
     fig.update_yaxes(visible=False)
@@ -3264,7 +3273,7 @@ elif section == "Region Matching":
         map_col, bar_col = st.columns([3, 1], gap="medium")
         with map_col:
             if is_composite:
-                fig = station_reach_map(cell_sigma, cell_rectangles, reach_window_label)
+                fig = station_reach_map(cell_sigma, cell_rectangles, reach_window_label, is_annual)
             else:
                 var_key = RM_REACH_LABEL_TO_VAR[reach_variable]
                 kind = GRID_VARS[var_key]["kind"]
@@ -3283,7 +3292,7 @@ elif section == "Region Matching":
                 dep_native = convert_delta(dep_raw, kind, metric)
                 fig = station_reach_variable_map(
                     cell_sigma, cell_rectangles, reach_window_label, dep_native,
-                    RM_REACH_VAR_LABELS[var_key], kind, metric)
+                    RM_REACH_VAR_LABELS[var_key], kind, metric, is_annual)
             st.plotly_chart(fig, width=W, config={"displayModeBar": False})
         with bar_col:
             if is_composite:
