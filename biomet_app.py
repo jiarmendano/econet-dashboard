@@ -1169,6 +1169,15 @@ def month_scale(highlight=None, extra_days=0):
         unsafe_allow_html=True)
 
 
+# Selection-overlay fill alpha shared by region_map()'s state/region
+# highlight and zip_radius_map()'s radius halo -- one constant so both
+# stay the same red regardless of which mode drew them. Raised from 0.25
+# (too faint against the region fills underneath, per user feedback) to
+# 0.45; both overlays also carry a solid T["accent"] outline now, which
+# 0.25 alone did not.
+SEL_FILL_ALPHA = 0.45
+
+
 def _conus_region_base_map(state_regions, cells):
     """The shared base layer behind BOTH region_map() and
     zip_radius_map() (follow-up request): five USDA-ARS region fills, at
@@ -1239,25 +1248,28 @@ def region_map(state_regions, cells, active_region, active_states, height=460):
     """CONUS states filled by USDA-ARS region (_conus_region_base_map(),
     shared with zip_radius_map()), with the current selection -- selected
     states if any, else the whole active region -- drawn on top as a
-    translucent red area (the same T["accent"] tint and 0.25 alpha
+    translucent red area (the same T["accent"] tint and SEL_FILL_ALPHA
     zip_radius_map()'s own halo uses, not the active region's own colour
     at higher opacity: see _conus_region_base_map()'s own docstring for
-    why) plus highlighted points. scope="usa": nc_map()'s Mercator choice
-    is to avoid tilting North Carolina at that latitude; at the
-    full-country scale Albers (what scope="usa" gives Plotly) is the
-    projection that's actually correct."""
+    why), outlined in solid T["accent"] so the selected state(s) read
+    clearly against the region's own pastel fill underneath, plus
+    highlighted points. scope="usa": nc_map()'s Mercator choice is to
+    avoid tilting North Carolina at that latitude; at the full-country
+    scale Albers (what scope="usa" gives Plotly) is the projection
+    that's actually correct."""
     fig = _conus_region_base_map(state_regions, cells)
 
     sel_states = active_states if active_states else sorted(
         state_regions.loc[state_regions["region"] == active_region, "state"])
     hi = cells[cells["state"].isin(sel_states)]
 
-    sel_rgba = _hex_to_rgba(T["accent"], 0.25)
+    sel_rgba = _hex_to_rgba(T["accent"], SEL_FILL_ALPHA)
     fig.add_trace(go.Choropleth(
         locations=[STATE_ABBR[s] for s in sel_states],
         z=[1] * len(sel_states), locationmode="USA-states",
         colorscale=[[0, sel_rgba], [1, sel_rgba]], showscale=False,
-        marker_line_width=0, hoverinfo="skip", showlegend=False))
+        marker_line_color=T["accent"], marker_line_width=2,
+        hoverinfo="skip", showlegend=False))
 
     fig.add_trace(go.Scattergeo(
         lon=hi["lon"], lat=hi["lat"], mode="markers",
@@ -1314,11 +1326,12 @@ def zip_radius_map(state_regions, cells, zip_lat=None, zip_lon=None, radius_km=N
     of which toggle is active, per the user's own explicit requirement.
 
     When a ZIP has resolved: the radius circle is a filled halo (a
-    closed ring, fill="toself", translucent T["accent"]) with a SOLID
-    outline rather than a dotted one, an explicit visible area rather
-    than only a thin line -- the same tint region_map() now uses for ITS
-    OWN selection overlay, so a selection reads the same red regardless
-    of which mode produced it. The X centroid marker is unchanged. Cells
+    closed ring, fill="toself", translucent T["accent"] at SEL_FILL_ALPHA)
+    with a SOLID outline rather than a dotted one, an explicit visible
+    area rather than only a thin line -- the same tint and outline width
+    region_map() now uses for ITS OWN selection overlay, so a selection
+    reads the same red regardless of which mode produced it. The X
+    centroid marker is unchanged. Cells
     within the radius are highlighted in T["accent"], drawn last so they
     sit above both the halo fill and the muted backdrop. Draws the halo
     even when matched_cells is empty, so a zero-cell radius still shows
@@ -1330,8 +1343,8 @@ def zip_radius_map(state_regions, cells, zip_lat=None, zip_lon=None, radius_km=N
         circle_lat, circle_lon = _circle_points(zip_lat, zip_lon, radius_km)
         fig.add_trace(go.Scattergeo(
             lat=circle_lat, lon=circle_lon, mode="lines",
-            line=dict(color=T["accent"], width=1.5),
-            fill="toself", fillcolor=_hex_to_rgba(T["accent"], 0.25),
+            line=dict(color=T["accent"], width=2),
+            fill="toself", fillcolor=_hex_to_rgba(T["accent"], SEL_FILL_ALPHA),
             hoverinfo="skip", showlegend=False))
 
         fig.add_trace(go.Scattergeo(
@@ -2272,7 +2285,7 @@ def region_radar(variables, region_py, station_pentad, stations,
         r=outer + [outer[0]], theta=theta_closed, mode="lines", fill="tonext",
         fillcolor=T["accent_soft"], opacity=0.6,
         line=dict(color=T["accent"], width=1.5),
-        name="Selected region conditions", hoverinfo="skip"))
+        name="Selected region", hoverinfo="skip"))
 
     for i, stn in enumerate(stations):
         c = STATION_COLORS[i % len(STATION_COLORS)]
@@ -2501,7 +2514,7 @@ def region_radar_departure(variables, region_py, station_pentad, stations,
         r=[0] * len(theta_closed), theta=theta_closed, mode="lines+markers",
         line=dict(color=T["accent"], width=2),
         marker=dict(color=T["accent"], size=7, symbol="circle"),
-        name="Selected region conditions", hoverinfo="skip"))
+        name="Selected region", hoverinfo="skip"))
 
     for i, stn in enumerate(stations):
         c = STATION_COLORS[i % len(STATION_COLORS)]
