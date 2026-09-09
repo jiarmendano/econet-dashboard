@@ -1,5 +1,5 @@
 streamlit>=1.55
 pandas>=2.2
-plotly>=6.0
+plotly>=7.0,<8.0  # geo renderer needs CW exterior rings, opposite RFC 7946
 numpy>=1.26
 scipy>=1.11
