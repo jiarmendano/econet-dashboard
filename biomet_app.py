@@ -977,9 +977,9 @@ HINTS = {
         "station (using the sigma dissimilarity index, that combines "
         "mean temperature, diurnal temperature range, day-to-day "
         "temperature change, dew point, rainfall, and days THImax ≥ "
-        "79). Larger sigma values mean more different. Values below 2 "
-        "sigma are considered an acceptable analogue. More details in "
-        "Advanced search.",
+        "79). Larger sigma values mean more different. Values at or "
+        "below 2 sigma are considered an acceptable analogue. More "
+        "details in Advanced search.",
     "rm_reach_variable_block":
         "This is a plain difference in the variable's own units. Each "
         "grid cell is coloured by how much higher (red) or lower (blue) "
