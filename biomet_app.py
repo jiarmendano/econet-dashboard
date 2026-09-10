@@ -21,6 +21,7 @@ import streamlit as st
 from scipy.stats import chi, norm
 
 import region_windows as rw
+from trajectory import trajectory_correlation
 from zip_radius import (select_cells_for_zip_radius,
                         load_zip_lookup as _load_zip_lookup,
                         EARTH_RADIUS_KM)
@@ -83,19 +84,21 @@ USDA_REGION_COLORS = ["#D5C9E1", "#B3FFFF", "#E0DAC2", "#C5FFE4", "#FFB1A7"]
 # and under red-green colour blindness even with the hue cue removed.
 # This palette's own luminance RISES from swatch 0 (0.19) to swatch 11
 # (0.87) before falling to swatch 27 (0.01) -- a spectral shape, not a
-# one-directional ramp -- so bins 0-2 (teal/green, luminance 0.22/0.47/
-# 0.87) do not honour that property; only bins 2-6 (pale yellow-green
-# through maroon) decrease monotonically. Swapped in as given rather
-# than restricted to the monotonic half of the palette, which would
-# have dropped the green "good match" hue entirely -- pending
+# one-directional ramp. Re-picked twice since (re-checked numerically
+# both times, still not monotonic): current bins read 0.2155, 0.5836,
+# 0.8329 -- rising through the teal/green/pale-yellow bins -- then
+# 0.3806, 0.1048, 0.0454, 0.0117, decreasing from bin 2 onward. Bins
+# 0-2 still don't honour the monotonic property; only bins 2-6 do.
+# Kept as given rather than restricted to the monotonic half, which
+# would drop the green "good match" hue entirely -- pending
 # confirmation this reads well in practice.
 #
 # Same 7 colours in both themes -- sigma severity isn't a light/dark-
 # mode concept -- kept under THEMES anyway, not a standalone module
 # constant, so a future theme swap has one place to change it, the same
 # reasoning region_colors already follows.
-SIGMA_RAMP_7 = ["#0A8E94", "#72C79E", "#E5F8AD", "#E9B930",
-               "#F68B00", "#8D232B", "#4f0f00"]
+SIGMA_RAMP_7 = ["#0A8E94", "#98D8A1", "#f2f17e", "#F68B00",
+               "#9A3C41", "#7F000D", "#3b0b00"]
 
 THEMES = {
     "dark": dict(
@@ -391,6 +394,13 @@ def inject_css(t):
          bar above it and with breathing room before the radar below. */
       .st-key-rm_selected_window {{
           margin-top:6px; margin-bottom:20px; }}
+
+      /* Station reach's own "land area under 2 sigma" KPI: opposite of
+         the box above -- this one sits right on top of the map, and
+         Streamlit's own default element spacing below it (~1rem) read
+         as unintentional dead space between two things that belong
+         together, not breathing room. */
+      .st-key-reach_kpi {{ margin-bottom:-14px; }}
 
       /* Automatic mode's station/window/sigma table, to the left of the
          radar rather than stacked full-width above it. */
@@ -975,6 +985,10 @@ HINTS = {
         "grid cell is coloured by how much higher (red) or lower (blue) "
         "its own conditions are than the station's, over the same "
         "windows shown on hover.",
+    "rm_reach_all_stations":
+        "This is the best of six, not the reach of one station. Each "
+        "grid cell shows the lowest sigma dissimilarity found across "
+        "all six stations. Hover to see which station matched.",
     "rm_reach_window":
         "This window applies to every coloured cell on the map. The "
         "station's own window is picked automatically: the app tries "
@@ -1051,7 +1065,7 @@ HINTS = {
         "principal-component space (adapted from "
         "[*Mahony et al.*, 2017, Glob Change Biol. 23, 3934-3955]"
         "(https://onlinelibrary.wiley.com/doi/10.1111/gcb.13645)). "
-        "Under 2σ, the climate is considered an acceptable analogue "
+        "At or under 2σ, the climate is considered an acceptable analogue "
         "([*Chaudhary et al.*, 2023, Sci Rep 13, 9317]"
         "(https://www.nature.com/articles/s41598-023-35887-x)).",
 }
@@ -1080,6 +1094,13 @@ RM_REACH_LENGTH_LABELS = {"12mo": "Annual", "3mo": "3 months",
 # the caption below it can check against the same string rather than a
 # literal repeated at both places.
 RM_REACH_COMPOSITE_LABEL = "Composite sigma dissimilarity"
+
+# The station row's extra "All stations" button (Task, "best of six").
+# Stored in the same reach_station session key the six real station
+# names use -- everywhere that key is read already just needs one more
+# comparison (== ALL_STATIONS_LABEL) rather than a second, parallel
+# piece of state to keep in sync with it.
+ALL_STATIONS_LABEL = "All stations"
 
 # The Variable selectbox's other options (Task F): the same six default
 # variables precompute_station_reach.py already stores a native-unit
@@ -1427,7 +1448,7 @@ def _filter_geojson(cell_geojson, cell_ids):
 
 
 def station_reach_map(cell_sigma, cell_geojson, cell_window_label, is_annual,
-                      state_line_blend=0.3, height=560):
+                      state_line_blend=0.3, show_winner=False, height=560):
     """Every grid cell, coloured by its own composite sigma dissimilarity
     against one station in one window (station_reach.parquet, already
     filtered to that one station/window, joined to conus_grid.parquet
@@ -1448,10 +1469,22 @@ def station_reach_map(cell_sigma, cell_geojson, cell_window_label, is_annual,
     so the hover's "(best match)" phrasing is dropped rather than
     implying a comparison that never happened.
 
+    show_winner: All-stations mode (Task, "best of six") -- cell_sigma
+    is then already the per-cell ARGMIN across all six stations, so its
+    own `station` column names a different station on different cells.
+    Without naming it in the hover, this view is unreadable: a cell's
+    colour would claim a match with no way to tell which station earned
+    it.
+
     State boundaries are a separate Choropleth trace (transparent fill,
     thin THEMES line), added AFTER the bin traces so it draws on top of
     them: geo.showsubunits draws underneath the cell polygons instead
-    and was rejected for exactly that reason."""
+    and was rejected for exactly that reason.
+
+    A cell missing from cell_sigma entirely (dropped by the trend filter
+    in precompute_station_reach.py -- no candidate survives) gets its
+    own flat T["muted"] trace, no legend entry, own hover line -- see
+    the comment where it's added, below the bin loop."""
     sigma = cell_sigma["sigma"].to_numpy()
     bin_idx = sigma_bin_index(sigma)
     ramp = T["sigma_ramp"]
@@ -1465,12 +1498,21 @@ def station_reach_map(cell_sigma, cell_geojson, cell_window_label, is_annual,
             continue
         sigma_text = [f"{s:.2f}σ" if np.isfinite(s) else "extremely novel (off scale)"
                      for s in sel["sigma"]]
-        customdata = np.stack([
+        fields = [
             sel["state"].to_numpy(),
             np.array(sigma_text, dtype=object),
             np.full(len(sel), cell_window_label, dtype=object),
             sel["station_window"].to_numpy(),
-        ], axis=-1)
+        ]
+        hovertemplate = (
+            "State: %{customdata[0]}<br>"
+            "Sigma dissimilarity index: %{customdata[1]}<br>"
+            "Grid cell time window (selected): %{customdata[2]}<br>"
+            f"{station_window_label}: " + "%{customdata[3]}")
+        if show_winner:
+            fields.append(sel["station"].to_numpy())
+            hovertemplate += "<br>Best-matching station: %{customdata[4]}"
+        customdata = np.stack(fields, axis=-1)
         fig.add_trace(go.Choropleth(
             geojson=_filter_geojson(cell_geojson, sel["cell_id"]),
             locations=sel["cell_id"], featureidkey="properties.cell_id",
@@ -1478,12 +1520,37 @@ def station_reach_map(cell_sigma, cell_geojson, cell_window_label, is_annual,
             showscale=False, marker_line_width=0,
             name=label, showlegend=True,
             customdata=customdata,
-            hovertemplate=(
-                "State: %{customdata[0]}<br>"
-                "Sigma dissimilarity index: %{customdata[1]}<br>"
-                "Grid cell time window (selected): %{customdata[2]}<br>"
-                f"{station_window_label}: " + "%{customdata[3]}"
-                "<extra></extra>")))
+            hovertemplate=hovertemplate + "<extra></extra>"))
+
+    # A cell absent from station_reach.parquet (every candidate excluded
+    # by the trend filter, no survivor for the argmin -- 7 of 223,314
+    # rows, all so far at 3-month windows) has no row in cell_sigma at
+    # all, so the loop above never draws it: left alone, that cell's
+    # polygon gets no Choropleth trace whatsoever and the transparent
+    # geo background (bgcolor="rgba(0,0,0,0)" above) shows through as a
+    # hole in the raster, indistinguishable from "outside the grid
+    # entirely" and easy to mistake for a data gap rather than a real,
+    # named outcome. Drawn here as its own flat T["muted"] trace instead
+    # -- the missing set is cell_geojson's own full cell_id universe
+    # minus whatever cell_sigma actually has, so this works unchanged in
+    # All-stations mode too (there, a cell only lands in this set if
+    # EVERY station lacks a surviving candidate for it, not just the one
+    # this trace's absence would suggest). No legend entry (per the
+    # request that added this): 7 rows out of 223,314 doesn't warrant
+    # one, and grouping it into the bin loop's own legend would wrongly
+    # imply it's an eighth sigma bin rather than "no sigma computed at
+    # all".
+    all_cell_ids = {f["properties"]["cell_id"] for f in cell_geojson["features"]}
+    missing_ids = sorted(all_cell_ids - set(cell_sigma["cell_id"]))
+    if missing_ids:
+        fig.add_trace(go.Choropleth(
+            geojson=_filter_geojson(cell_geojson, missing_ids),
+            locations=missing_ids, featureidkey="properties.cell_id",
+            z=[1] * len(missing_ids),
+            colorscale=[[0, T["muted"]], [1, T["muted"]]],
+            showscale=False, marker_line_width=0, showlegend=False,
+            hovertemplate=("No station window passes the seasonal-trend "
+                          "filter for this cell<extra></extra>")))
 
     # T["muted"] alone (a real grey) was tried here in place of T["line"]
     # but reverted -- too dark to read against the ramp's own darkest
@@ -1633,30 +1700,55 @@ def station_reach_variable_legend(dep_native, var_label, kind, metric, height=56
     return fig
 
 
-def sigma_bin_bar_chart(cell_sigma, height=560):
-    """Beside the station reach map (Task B): what share of the 2863
-    cells falls in each of the 7 sigma bins, for the same station and
-    window the map is already showing. Seven separate horizontal bars,
-    not one stacked bar -- a stacked bar makes every bin after the first
-    hard to compare since none of them share a common baseline; seven
-    separate bars all start at zero. Same SIGMA_BIN_LABELS order and
-    same THEMES["sigma_ramp"] colours as the map's own legend, so this
-    reads as a plain expansion of that legend, not a second colour
-    scheme to learn. Composite only -- there is only one quantity to
-    show a distribution of until the per-variable view exists."""
+def sigma_bin_bar_chart(cell_sigma, metric, show_area=False, height=560):
+    """Beside the station reach map (Task B): what share of CONUS land
+    area falls in each of the 7 sigma bins, for the same station and
+    window the map is already showing. Weighted by cell_sigma's own
+    `area_weight` column (from conus_grid.parquet, merged in by the
+    caller) -- plain cell-count percentages were biased, since a grid
+    cell's true area falls with cos(latitude) and a raw count treats a
+    small high-latitude cell the same as a large low-latitude one.
+    Northern stations' reach was overstated relative to southern ones
+    under the old count-based version (see the report this change's own
+    commit cites for the actual size of that bias on a concrete case).
+
+    show_area toggles the x-axis from percentage (default) to absolute
+    land area, via AREA_WEIGHT_TO_KM2 (km2, or mi2 through MI2_PER_KM2
+    when metric is False, following the same global Metric/Imperial
+    setting every other measurement in this app respects).
+
+    Seven separate horizontal bars, not one stacked bar -- a stacked
+    bar makes every bin after the first hard to compare since none of
+    them share a common baseline; seven separate bars all start at
+    zero. Same SIGMA_BIN_LABELS order and same THEMES["sigma_ramp"]
+    colours as the map's own legend, so this reads as a plain expansion
+    of that legend, not a second colour scheme to learn. Composite
+    only -- there is only one quantity to show a distribution of until
+    the per-variable view exists."""
     bin_idx = sigma_bin_index(cell_sigma["sigma"].to_numpy())
-    n = len(cell_sigma)
-    pct = [100 * int((bin_idx == b).sum()) / n if n else 0
-          for b in range(len(SIGMA_BIN_LABELS))]
+    weight = cell_sigma["area_weight"].to_numpy()
+    total_weight = weight.sum()
+    bin_weight = [weight[bin_idx == b].sum() for b in range(len(SIGMA_BIN_LABELS))]
     ramp = T["sigma_ramp"]
 
+    if show_area:
+        area_km2 = [w * AREA_WEIGHT_TO_KM2 for w in bin_weight]
+        values = area_km2 if metric else [a * MI2_PER_KM2 for a in area_km2]
+        x_title = f"Land area ({'km²' if metric else 'mi²'})"
+        text = [f"{v:,.0f}" for v in values]
+        hover = "%{y}: %{text}<extra></extra>"
+    else:
+        values = [100 * w / total_weight if total_weight else 0 for w in bin_weight]
+        x_title = "% of land area"
+        text = [f"{v:.1f}%" for v in values]
+        hover = "%{y}: %{text}<extra></extra>"
+
     fig = go.Figure(go.Bar(
-        x=pct, y=SIGMA_BIN_LABELS, orientation="h", marker_color=ramp,
-        text=[f"{p:.1f}%" for p in pct], textposition="outside",
-        hovertemplate="%{y}: %{x:.1f}%<extra></extra>"))
+        x=values, y=SIGMA_BIN_LABELS, orientation="h", marker_color=ramp,
+        text=text, textposition="outside", hovertemplate=hover))
     fig.update_yaxes(categoryorder="array", categoryarray=SIGMA_BIN_LABELS,
                      autorange="reversed", gridcolor=T["line"])
-    fig.update_xaxes(title="% of grid cells", range=[0, max(max(pct), 1) * 1.2],
+    fig.update_xaxes(title=x_title, range=[0, max(max(values), 1) * 1.2],
                      gridcolor=T["line"])
     fig.update_layout(
         height=height, showlegend=False,
@@ -2176,47 +2268,6 @@ def window_date_range(p_start, win_pentads, ref_year=2001):
     return start, _pentad_end_date(p_end_raw - N_PENTADS_PER_YEAR, ref_year + 1), True
 
 
-def _trajectory_correlation(region_pentad_mean, station_pentad_mean, usable,
-                            station_mean, station_std):
-    """Pearson correlation of the region's and the station's mean
-    seasonal trajectory across the window, position by position (index
-    0..win_pentads-1 in each side's own window order) rather than by
-    calendar pentad, since the two windows generally sit in different
-    parts of the year. CLAUDE.md, "Trend is a filter, not a weight":
-    same mean with opposite seasonal trend is the case a level-only
-    score gets wrong, so a negative correlation here excludes the
-    candidate from the search entirely (see the caller), regardless of
-    how good its sigma dissimilarity is.
-
-    Both `region_pentad_mean` and `station_pentad_mean` are one row per
-    window position already (mean across reference-period years),
-    reindexed by the caller into that shared position order, columns ==
-    the full requested variable list. Each of `usable` (sigma_dissim-
-    ilarity()'s usable list for this candidate -- variables the station
-    has nonzero interannual SD on) is z-scored by the station's own
-    overall-window mean/SD -- the same scale sigma_dissimilarity() puts
-    every variable on -- and the z-scored columns are averaged into one
-    composite trajectory per side, so variables with very different
-    native units (mm vs degC vs a day count) contribute comparably
-    rather than one dominating by magnitude alone; this is a design
-    choice for combining variables into a single trajectory, not a
-    quantity either cited paper defines. Returns nan (never excluded --
-    a correlation against nothing to compare is not evidence of a
-    mismatch) if there are fewer than 2 window positions, no usable
-    variable, or either side's composite trajectory is flat."""
-    if not usable or region_pentad_mean.shape[0] < 2:
-        return np.nan
-    reg_z = (region_pentad_mean[usable] - station_mean[usable]) / station_std[usable]
-    sta_z = (station_pentad_mean[usable] - station_mean[usable]) / station_std[usable]
-    reg_traj = reg_z.mean(axis=1).to_numpy()
-    sta_traj = sta_z.mean(axis=1).to_numpy()
-    if np.isnan(reg_traj).any() or np.isnan(sta_traj).any():
-        return np.nan
-    if np.std(reg_traj) < 1e-12 or np.std(sta_traj) < 1e-12:
-        return np.nan
-    return float(np.corrcoef(reg_traj, sta_traj)[0, 1])
-
-
 def search_best_matches(region_py, station_pentad, p_lo, p_hi, y_lo, y_hi,
                         variables, stations=None, top_k=3, near_min_frac=0.05):
     """Automatic best-match search (Task 14). The region's window
@@ -2229,10 +2280,12 @@ def search_best_matches(region_py, station_pentad, p_lo, p_hi, y_lo, y_hi,
     default six stations).
 
     Candidates whose pentad-trajectory correlation with the region is
-    negative (_trajectory_correlation()) are excluded before ranking, per
-    CLAUDE.md's "Trend is a filter, not a weight" -- same mean, opposite
-    seasonal trend, is the case sigma dissimilarity's level-only
-    comparison cannot see for itself.
+    negative (trajectory_correlation(), trajectory.py -- shared with
+    precompute_station_reach.py's own window search, so both answer
+    "which station window fits" the same way) are excluded before
+    ranking, per CLAUDE.md's "Trend is a filter, not a weight" -- same
+    mean, opposite seasonal trend, is the case sigma dissimilarity's
+    level-only comparison cannot see for itself.
 
     The top `top_k` are chosen greedily by ascending sigma, but with a
     diversity rule: after a candidate is chosen, every remaining
@@ -2286,8 +2339,11 @@ def search_best_matches(region_py, station_pentad, p_lo, p_hi, y_lo, y_hi,
             window_pentads = _window_pentad_order(s, win_pentads)
             station_pentad_mean = (sta_win.groupby("pentad")[variables].mean()
                                    .reindex(window_pentads))
-            corr = _trajectory_correlation(region_pentad_mean, station_pentad_mean,
-                                           res["usable"], station_mean, station_std)
+            usable = res["usable"]
+            corr = trajectory_correlation(
+                region_pentad_mean[usable].to_numpy(),
+                station_pentad_mean[usable].to_numpy(), usable,
+                station_mean[usable].to_numpy(), station_std[usable].to_numpy())
 
             candidates.append(dict(
                 station=station, start=s, p_lo=c_lo, p_hi=c_hi,
@@ -2570,17 +2626,34 @@ SIGMA_BANDS = [
 # a value gets projected onto, so this is bin edges, not a gradient.
 SIGMA_BIN_EDGES = [1, 2, 3, 4, 5, 6]
 SIGMA_BIN_LABELS = ["0-1σ", "1-2σ", "2-3σ", "3-4σ",
-                    "4-5σ", "5-6σ", "≥6σ"]
+                    "4-5σ", "5-6σ", ">6σ"]
+
+# conus_grid.parquet's own area_weight column is proportional to true
+# cell area (CLAUDE.md: "Cell area is proportional to
+# sin(lat_north) - sin(lat_south)") but not calibrated to it -- it sums
+# to ~19.2 over 2863 cells, not anything in km2. Verified empirically
+# (not assumed) against the exact spherical-cap formula
+# (R=6371.0 km, 0.625 x 0.5 degree cells): area_km2 / area_weight is
+# the SAME constant for every one of the 2863 cells to 9 significant
+# figures (std/mean ~1.5e-14), confirming area_weight is this exact
+# quantity on an arbitrary scale, not merely proportional-ish. Using
+# this constant converts the stored column straight to km2 with no
+# separate area computation needed at call time.
+AREA_WEIGHT_TO_KM2 = 442764.298533
+MI2_PER_KM2 = 0.386102
 
 
 def sigma_bin_index(sigma):
     """Which of SIGMA_BIN_LABELS' 7 bins a sigma value (scalar or array)
-    falls in, 0-6. searchsorted(..., side="right"), not np.digitize's
-    default rule -- unambiguous at the edges and handles +inf as the top
-    bin with no special case (chi.sf underflow to exactly 0 -- see the
-    WAYN/Annual cell logged in the precompute commit -- sorts above
-    every finite edge with no extra branch needed)."""
-    return np.searchsorted(SIGMA_BIN_EDGES, sigma, side="right")
+    falls in, 0-6, each bin's own upper edge included in that bin (e.g.
+    sigma == 1.0 is "0-1sigma", not "1-2sigma") -- side="left", not
+    np.digitize's default rule or side="right" (which would exclude the
+    upper edge instead). Still unambiguous at the edges, and still
+    handles +inf as the top bin with no special case: chi.sf underflow
+    to exactly 0 (see the WAYN/Annual cell logged in the precompute
+    commit) sorts above every finite edge with side="left" the same as
+    it did with side="right"."""
+    return np.searchsorted(SIGMA_BIN_EDGES, sigma, side="left")
 
 
 def sigma_band_color(sigma):
@@ -3247,14 +3320,25 @@ elif section == "Region Matching":
         # station change (Task 3).
         reach_stations = sorted(station_reach["station"].unique())
         st.session_state.setdefault("reach_station", reach_stations[0])
-        station_cols = st.columns(len(reach_stations))
+        # "All stations" is an extra button in the same row, not a
+        # separate toggle -- it's the same choice as picking one
+        # station, just a seventh option, so it shares reach_station's
+        # own session key (ALL_STATIONS_LABEL is never a real station
+        # name, so it can't collide with one).
+        station_cols = st.columns(len(reach_stations) + 1)
         for i, stn in enumerate(reach_stations):
             station_cols[i].button(
                 stn, key=f"reach_btn_{stn}", width=W,
                 type="primary" if st.session_state.reach_station == stn
                 else "secondary",
                 on_click=_set_reach_station, args=(stn,))
+        station_cols[-1].button(
+            ALL_STATIONS_LABEL, key="reach_btn_all", width=W,
+            type="primary" if st.session_state.reach_station == ALL_STATIONS_LABEL
+            else "secondary",
+            on_click=_set_reach_station, args=(ALL_STATIONS_LABEL,))
         reach_station = st.session_state.reach_station
+        reach_all = reach_station == ALL_STATIONS_LABEL
 
         st.session_state.setdefault("reach_length", RM_REACH_LENGTHS[0])
         st.session_state.setdefault(
@@ -3299,11 +3383,20 @@ elif section == "Region Matching":
                 st.button("▶", key="reach_window_next", disabled=is_annual,
                          on_click=_step_reach_window, args=(1,))
 
+        # All-stations mode only has one quantity to show -- a per-cell
+        # minimum sigma across six stations has no native-unit
+        # equivalent, since "best of six" values could come from six
+        # different stations at six different windows. Forced (and the
+        # control disabled) rather than left selectable and silently
+        # ignored; reseeding session_state here is legal, it happens
+        # before the widget below is instantiated this run.
+        if reach_all:
+            st.session_state.reach_variable = RM_REACH_COMPOSITE_LABEL
         with var_col:
             st.selectbox(
                 "Variable",
                 [RM_REACH_COMPOSITE_LABEL] + [RM_REACH_VAR_LABELS[v] for v in RM_REACH_VARS],
-                key="reach_variable")
+                key="reach_variable", disabled=reach_all)
         reach_variable = st.session_state.reach_variable
         is_composite = reach_variable == RM_REACH_COMPOSITE_LABEL
 
@@ -3312,17 +3405,36 @@ elif section == "Region Matching":
         # actually selected: the composite's own text names the six
         # variables and the 2-sigma cutoff, neither of which apply to a
         # single variable's plain native-unit departure (Task F).
-        st.caption(HINTS["rm_reach_block"] if is_composite
-                  else HINTS["rm_reach_variable_block"])
+        # All-stations gets its own text ahead of the composite's own,
+        # since a per-cell minimum across six stations needs explaining
+        # as "best of six", not as one station's own reach.
+        if reach_all:
+            st.caption(HINTS["rm_reach_all_stations"])
+        elif is_composite:
+            st.caption(HINTS["rm_reach_block"])
+        else:
+            st.caption(HINTS["rm_reach_variable_block"])
         st.caption("All values computed from MERRA-2, 1991-2025.")
 
         reach_window = st.session_state.reach_window
         reach_window_label = rw.DISPLAY_LABEL[reach_window]
 
-        cell_sigma = station_reach[
-            (station_reach["station"] == reach_station)
-            & (station_reach["window"] == reach_window)
-        ].merge(grid[["lon", "lat", "state"]], on=["lon", "lat"], how="left")
+        grid_cols = ["lon", "lat", "state", "area_weight"]
+        if reach_all:
+            # Best of six: one row per cell, the argmin station's own
+            # row (sigma, station, and that station's own winning
+            # station_window all come from together, since they're the
+            # same row -- not a separate lookup that could disagree
+            # with the sigma actually being shown).
+            window_rows = station_reach[station_reach["window"] == reach_window]
+            best_idx = window_rows.groupby(["lon", "lat"])["sigma"].idxmin()
+            cell_sigma = window_rows.loc[best_idx].merge(
+                grid[grid_cols], on=["lon", "lat"], how="left")
+        else:
+            cell_sigma = station_reach[
+                (station_reach["station"] == reach_station)
+                & (station_reach["window"] == reach_window)
+            ].merge(grid[grid_cols], on=["lon", "lat"], how="left")
 
         # Map shifted slightly left of centre by sharing the row with a
         # second column to its right -- the bin-share bar chart in
@@ -3330,9 +3442,81 @@ elif section == "Region Matching":
         # per-variable mode (Task F/G), so the map itself stays the same
         # size and position in this row either way.
         map_col, bar_col = st.columns([3, 1], gap="medium")
+
+        # bar_col's own units toggle is rendered first, ahead of map_col's
+        # content below, purely so show_area is known before the KPI in
+        # map_col needs it -- Streamlit appends each `with col:` block to
+        # that column in code order, so this doesn't move the toggle
+        # visually; it still ends up above the bar chart, same column.
+        # Rendering it first is also what puts it at the very top of
+        # bar_col, which is what the KPI beside it (map_col's own first
+        # element) needs to top-align against.
+        show_area = False
+        if is_composite:
+            with bar_col:
+                st.session_state.setdefault("reach_bar_mode", "Percentage")
+                st.radio(
+                    "Bar chart units", ["Percentage", "Absolute area"],
+                    key="reach_bar_mode", horizontal=True,
+                    label_visibility="collapsed",
+                    format_func=lambda m: m if m == "Percentage"
+                    else f"Absolute area ({'km²' if metric else 'mi²'})")
+                show_area = st.session_state.reach_bar_mode == "Absolute area"
+
         with map_col:
             if is_composite:
-                fig = station_reach_map(cell_sigma, cell_rectangles, reach_window_label, is_annual)
+                # KPI: land area at or under the 2 sigma "acceptable
+                # analogue" threshold (Mahony et al. 2017 -- see
+                # HINTS["rm_sigma"]), area-weighted the same way as the
+                # bar chart beside it, and following the same
+                # Percentage/Absolute area choice. Centred, and the
+                # first thing drawn in this column, to line up against
+                # bar_col's own units toggle above. <=2, matching the
+                # bins' own upper-edge-inclusive convention just above
+                # (sigma == 2.0 reads as an acceptable analogue, not a
+                # miss by a hair).
+                #
+                # No text-transform:uppercase on the label (unlike the
+                # Overview KPI cards this otherwise matches): tried it
+                # here first and it rendered "sigma" as "SIGMA" and
+                # nearly turned the sigma SYMBOL upper-case too on the
+                # first wording -- sentence case throughout instead.
+                weight = cell_sigma["area_weight"].to_numpy()
+                under2_weight = weight[cell_sigma["sigma"].to_numpy() <= 2].sum()
+                total_weight = weight.sum()
+                if show_area:
+                    area_km2 = under2_weight * AREA_WEIGHT_TO_KM2
+                    value = area_km2 if metric else area_km2 * MI2_PER_KM2
+                    kpi_value = f"{value:,.0f} {'km²' if metric else 'mi²'}"
+                    footnote = ""
+                else:
+                    pct = 100 * under2_weight / total_weight if total_weight else 0
+                    kpi_value = f"{pct:.1f}%"
+                    # Only in percentage mode: an absolute area is
+                    # self-explanatory, but a bare percentage needs to
+                    # say what it's a share OF -- CONUS (this grid's own
+                    # scope throughout), not all US land, which would
+                    # silently include Alaska, Hawaii and the other
+                    # territories a reader might otherwise assume are
+                    # part of the base.
+                    footnote = (
+                        f'<div style="color:{T["muted"]}; font-size:.68rem; '
+                        'text-align:left; margin-top:4px;">* share of the '
+                        'contiguous United States (CONUS), excludes Alaska, '
+                        'Hawaii and the other territories</div>')
+                with st.container(key="reach_kpi"):
+                    st.markdown(
+                        f'<div style="background:{T["panel"]}; border:1px solid '
+                        f'{T["line"]}; border-radius:8px; padding:10px 14px; '
+                        'text-align:center;">'
+                        f'<div style="color:{T["muted"]}; font-size:.72rem;">'
+                        'Land area with a sigma dissimilarity ≤ 2</div>'
+                        f'<div style="color:{T["text"]}; font-size:1.45rem; '
+                        f'font-weight:600;">{kpi_value}{"*" if footnote else ""}'
+                        f'</div></div>{footnote}',
+                        unsafe_allow_html=True)
+                fig = station_reach_map(cell_sigma, cell_rectangles, reach_window_label,
+                                        is_annual, show_winner=reach_all)
             else:
                 var_key = RM_REACH_LABEL_TO_VAR[reach_variable]
                 kind = GRID_VARS[var_key]["kind"]
@@ -3353,10 +3537,12 @@ elif section == "Region Matching":
                     cell_sigma, cell_rectangles, reach_window_label, dep_native,
                     RM_REACH_VAR_LABELS[var_key], kind, metric, is_annual)
             st.plotly_chart(fig, width=W, config={"displayModeBar": False})
+
         with bar_col:
             if is_composite:
-                st.plotly_chart(sigma_bin_bar_chart(cell_sigma), width=W,
-                                config={"displayModeBar": False})
+                st.plotly_chart(
+                    sigma_bin_bar_chart(cell_sigma, metric, show_area),
+                    width=W, config={"displayModeBar": False})
             else:
                 st.plotly_chart(
                     station_reach_variable_legend(
