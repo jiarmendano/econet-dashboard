@@ -1091,6 +1091,21 @@ RM_REACH_VAR_LABELS = {v: GRID_VARS[v]["label"] for v in RM_REACH_VARS}
 RM_REACH_LABEL_TO_VAR = {label: v for v, label in RM_REACH_VAR_LABELS.items()}
 
 
+def _set_reach_station(stn):
+    """on_click for the station buttons below -- not an inline
+    `if button(...): session_state.reach_station = stn; st.rerun()`,
+    which was the actual cause of Task 3's filter-reset bug: that eager
+    st.rerun() aborted the script before reach_length's own widget was
+    ever instantiated in that run, Streamlit pruned reach_length's
+    session_state as "not rendered", and the next run's unconditional
+    setdefault() reseeded it to Annual -- reach_window then fell back
+    too, since its own candidates collapsed to just ["Annual"] once
+    length did. A callback runs to completion before Streamlit's own
+    implicit rerun, so every widget on the next pass instantiates
+    normally and nothing is pruned."""
+    st.session_state.reach_station = stn
+
+
 def _set_reach_length_window():
     """on_change for the window-length control -- same timing rule as
     _set_rm_window_annual() above: write reach_window's session_state
@@ -3225,18 +3240,20 @@ elif section == "Region Matching":
     with tab_reach:
         # Station: a horizontal button row, same pattern as Overview's
         # own station picker (ov_section_station) -- primary/secondary
-        # styling for the active one, on_click + st.rerun() rather than
-        # a selectbox.
+        # styling for the active one, on_click=_set_reach_station rather
+        # than an inline `if button(): ...; st.rerun()` -- see that
+        # function's own docstring for why the eager st.rerun() version
+        # was silently resetting Window length/Time window on every
+        # station change (Task 3).
         reach_stations = sorted(station_reach["station"].unique())
         st.session_state.setdefault("reach_station", reach_stations[0])
         station_cols = st.columns(len(reach_stations))
         for i, stn in enumerate(reach_stations):
-            if station_cols[i].button(
-                    stn, key=f"reach_btn_{stn}", width=W,
-                    type="primary" if st.session_state.reach_station == stn
-                    else "secondary"):
-                st.session_state.reach_station = stn
-                st.rerun()
+            station_cols[i].button(
+                stn, key=f"reach_btn_{stn}", width=W,
+                type="primary" if st.session_state.reach_station == stn
+                else "secondary",
+                on_click=_set_reach_station, args=(stn,))
         reach_station = st.session_state.reach_station
 
         st.session_state.setdefault("reach_length", RM_REACH_LENGTHS[0])
