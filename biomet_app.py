@@ -3409,12 +3409,30 @@ elif section == "Region Matching":
         # since a per-cell minimum across six stations needs explaining
         # as "best of six", not as one station's own reach.
         if reach_all:
-            st.caption(HINTS["rm_reach_all_stations"])
+            # One combined st.caption() call, not the shared MERRA-2 line
+            # below plus this block's own -- two separate captions read
+            # as two stacked lines; merging into one continuous paragraph
+            # is what lets the trend-filter sentence sit between them
+            # (base text, then the filter caveat, then the MERRA-2 line)
+            # without a visible break between unrelated-looking captions.
+            # The filter caveat only applies for 3/6/9-month windows: the
+            # trend filter never runs on Annual (only one candidate, no
+            # alternative alignment to prefer -- see
+            # precompute_station_reach.py), so stating it unconditionally
+            # would misdescribe the Annual case.
+            all_stations_text = HINTS["rm_reach_all_stations"]
+            if not is_annual:
+                all_stations_text += (
+                    " Only windows whose seasonal pattern runs in the "
+                    "same direction as the cell's are considered.")
+            all_stations_text += " All values computed from MERRA-2, 1991-2025."
+            st.caption(all_stations_text)
         elif is_composite:
             st.caption(HINTS["rm_reach_block"])
+            st.caption("All values computed from MERRA-2, 1991-2025.")
         else:
             st.caption(HINTS["rm_reach_variable_block"])
-        st.caption("All values computed from MERRA-2, 1991-2025.")
+            st.caption("All values computed from MERRA-2, 1991-2025.")
 
         reach_window = st.session_state.reach_window
         reach_window_label = rw.DISPLAY_LABEL[reach_window]
@@ -3994,8 +4012,40 @@ elif section == "Region Matching":
                         # in its own column of the control row. Named "...of
                         # stations" since that distinguishes it from a
                         # hypothetical automatic window/variable choice.
+                        #
+                        # The trend-filter sentence is appended, not baked into
+                        # HINTS["rm_auto_select"] itself, because it doesn't
+                        # apply when the region window is the full year: at
+                        # win_pentads == N_PENTADS_PER_YEAR every one of
+                        # search_best_matches()'s 36 SEARCH_STARTS candidates
+                        # covers the identical set of pentads, just rotated
+                        # (_wrapped_window()'s own docstring: "every other
+                        # start still covers the whole year, just wrapped, a
+                        # real (if redundant) window"). sigma_dissimilarity()
+                        # pools over the whole set regardless of rotation
+                        # order, so all 36 candidates tie exactly on sigma;
+                        # trajectory_correlation() alone would then decide the
+                        # winner, purely from how a signal happens to
+                        # correlate with a circularly-shifted copy of itself
+                        # -- comparing rotations of the same window, not
+                        # alternative alignments, the same degenerate case
+                        # Station reach's Annual window is exempted from
+                        # (precompute_station_reach.py, has_choice=False).
+                        # Advanced search's manual station-window slider
+                        # already special-cases this exact state ("when the
+                        # window is the full year the station-side slider ...
+                        # has only one position", CLAUDE.md block 2) -- this
+                        # is the automatic-search side of the same fact.
+                        auto_help = HINTS["rm_auto_select"]
+                        if win_pentads != N_PENTADS_PER_YEAR:
+                            auto_help += (
+                                " Only windows whose seasonal pattern runs in "
+                                "the same direction as the region's are "
+                                "considered, so a station cannot match on "
+                                "averages alone while its seasons run the "
+                                "other way.")
                         st.checkbox("Automatic selection of stations", key="rm_auto_select",
-                                   help=HINTS["rm_auto_select"])
+                                   help=auto_help)
 
                     with ctrl_window, st.container(key="rm_ctrl_window"):
                         if auto:
