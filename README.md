@@ -59,9 +59,13 @@ temperature change, dew point, rainfall, and days with THImax at or above 79.
 The sigma dissimilarity index gives how many standard deviations apart two
 locations are, across all variables at once, using a Mahalanobis distance in a
 reduced principal-component space. Adapted from Mahony et al., 2017, Glob
-Change Biol. 23, 3934-3955 (https://doi.org/10.1111/gcb.13645). Below 2 sigma
-the climate is considered an acceptable analogue, following Chaudhary et al.,
-2023, Sci Rep 13, 9317 (https://doi.org/10.1038/s41598-023-35887-x).
+Change Biol. 23, 3934-3955 (https://doi.org/10.1111/gcb.13645). At or under 2
+sigma the climate is considered an acceptable analogue, following Chaudhary et
+al., 2023, Sci Rep 13, 9317 (https://doi.org/10.1038/s41598-023-35887-x).
+
+For windows shorter than a year, only station windows whose seasonal pattern
+runs in the same direction as the target's are considered, so a station cannot
+match on averages alone while its seasons run the other way.
 
 Per variable, the standardised difference is the cell or region minus the
 station, divided by the station's own interannual standard deviation.
